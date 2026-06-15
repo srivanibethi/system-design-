@@ -3278,13 +3278,14 @@ This is a POSITIVE signal — it shows self-awareness and intellectual honesty.
 15. "Budget constraints on LLM API costs?"
 
 ### Interviewer's Likely Answers:
-- Multi-tenant SaaS, 50-100 enterprise customers
-- Each has 10-50 concurrent users
-- Mix of structured (ERP data) and unstructured (contracts, SOPs)
-- Daily data refresh minimum, real-time for critical metrics
-- Must cite sources, high accuracy, recommend only (no auto-actions)
-- SOC 2 required, US data residency
-- 10-15 seconds acceptable for complex queries
+- Google-scale platform: 10,000+ enterprise customers globally (think: Google Supply Chain AI as a service)
+- 500K-1M concurrent users across all tenants
+- Mix of structured (ERP data, 100B+ rows) and unstructured (10M+ documents per large customer)
+- Real-time streaming for all data, sub-minute freshness
+- Must cite sources, high accuracy, recommend AND auto-act for approved workflows
+- SOC 2, ISO 27001, FedRAMP, GDPR, data residency per region (US, EU, APAC)
+- <3 seconds for simple lookups, <8 seconds for complex analytical queries
+- Multi-region deployment (us-central1, europe-west4, asia-east1)
 
 ---
 
@@ -3304,16 +3305,19 @@ FUNCTIONAL REQUIREMENTS:
 5. Audit trail for compliance
 
 NON-FUNCTIONAL:
-- 100 customers × 50 users × ~5 queries/hour = ~25K queries/hour = ~7 QPS avg
-- Peak: 10x = 70 QPS  
-- Latency: <5s for simple lookups, <15s for complex analysis
-- Availability: 99.9% (44 min downtime/month)
-- Data isolation: Tenant A must NEVER see Tenant B's data
+- 10K customers × 100 active users × ~8 queries/hour = 8M queries/hour = ~2,200 QPS avg
+- Peak (Monday mornings, month-end, global overlap hours): 10x = 22,000 QPS
+- Burst: Black Friday/peak planning season: 50,000 QPS
+- Latency: p50 <2s, p95 <5s, p99 <10s (even for complex queries)
+- Availability: 99.99% (4.3 min downtime/month) — Google-grade SLO
+- Data isolation: Tenant A must NEVER see Tenant B's data (crypto-sharded)
+- Multi-region: active-active across 3+ regions for data residency
 
 COST ESTIMATE:
-- 25K queries/hour × $0.03/query (LLM) = $750/hour = $18K/day
-- With 60% cache hit rate: $7.2K/day
-- This is acceptable for enterprise SaaS ($50K+/year per customer)
+- 8M queries/hour × $0.008/query (with aggressive caching + model routing) = $64K/hour = $1.5M/day
+- With 80% semantic cache hit + model routing (70% to smaller models): $300K/day
+- At Google scale, amortized cost per customer: $30K/year → high-margin at enterprise pricing ($200K+/year)
+- Must justify: $110M/year run cost for $2B+ ARR business
 
 Does this scope feel right to you?"
 ```
@@ -3716,74 +3720,135 @@ regression, promote to 100% after 24h of green metrics."
 
 ---
 
-## DETAILED SCALE ESTIMATES
+## DETAILED SCALE ESTIMATES (GOOGLE-SCALE)
 
 ### Query Volume Modeling
 ```
 USERS:
-- 100 enterprise customers
-- Avg 30 active users per customer = 3,000 total users
+- 10,000 enterprise customers (Fortune 5000 + large mid-market)
+- Avg 100 active users per customer = 1,000,000 total registered users
+- ~300K DAU (30% daily active rate for enterprise tools)
 - Power users: 20% send 80% of queries
-- Avg session: 3 queries in 10 minutes, 4 sessions/day
+- Avg session: 5 queries in 15 minutes, 6 sessions/day (stickier than chat)
 
 QUERY MATH:
-- Active hours: 8am-6pm per timezone (effectively 16h with global spread)
-- Avg: 3,000 users × 12 queries/day = 36,000 queries/day = 0.6 QPS
-- Peak (Monday morning, month-end): 10x = 6 QPS
-- Burst (all users in one company run reports): 50 QPS for 5 minutes
+- Global platform: 24/7 usage across timezones (no quiet period)
+- Average: 300K DAU × 30 queries/day = 9M queries/day = ~105 QPS steady
+- Business hours amplification: 3x during global overlap (EU+US: 1-5pm UTC)
+- Peak (Monday mornings, month-end close, quarter-end): 10x = 1,050 QPS
+- Burst (Black Friday, Chinese New Year, major disruptions): 50x = 5,250 QPS
+- Absolute max design target: 10,000 QPS (headroom for growth)
 
-This is LOW QPS. The bottleneck is NOT throughput — it's:
-1. Latency per query (LLM calls are 3-15 seconds)
-2. Cost per query ($0.02-0.10 depending on complexity)
-3. Concurrent connections to LLM providers (rate limits)
+THIS IS HIGH QPS for LLM systems. The challenges are:
+1. LLM serving at 10K QPS: need massive GPU fleet or self-hosted models
+2. Cost per query at scale: $0.025/query × 9M/day = $225K/day UNOPTIMIZED
+3. Vector search at 10K QPS across 200B+ vectors
+4. Multi-tenancy isolation at speed (can't add per-query auth overhead)
+5. Global latency: need regional deployments, not single-region
+
+CRITICAL DESIGN DECISION:
+  At Google scale, you CANNOT rely solely on external LLM APIs (OpenAI, Anthropic).
+  You need:
+  - Self-hosted models (Gemini/PaLM on TPUs) for 80% of traffic (simple queries)
+  - Frontier model APIs (GPT-4/Claude) only for complex reasoning (20%)
+  - Aggressive semantic caching (80%+ hit rate for repeated patterns)
+  - Model cascade: smallest model that can handle each query type
 ```
 
 ### Storage Modeling
 ```
-PER CUSTOMER:
-- ERP data (structured): 50M rows × 200 bytes = 10 GB
-- Documents (unstructured): 10K docs × 200KB = 2 GB
-- Embeddings: 10K docs × 20 chunks × 6KB = 1.2 GB
-- Conversation history: 1K sessions × 5 turns × 2KB = 10 MB
-- Total per customer: ~14 GB
+PER CUSTOMER (Large Enterprise — top 10%):
+- ERP data (structured): 5B rows × 200 bytes = 1 TB
+- Documents (unstructured): 500K docs × 300KB = 150 GB
+- Embeddings: 500K docs × 50 chunks × 6KB = 150 GB
+- Conversation history: 100K sessions × 10 turns × 3KB = 3 GB
+- Customer knowledge graph: 50M nodes × 500B = 25 GB
+- Total per large customer: ~1.3 TB
 
-ALL CUSTOMERS:
-- 100 customers × 14 GB = 1.4 TB
-- Growth: 20%/year from new data, 30%/year from new customers
-- 3-year projection: ~5 TB
+PER CUSTOMER (Typical — median):
+- ERP data: 500M rows × 200 bytes = 100 GB
+- Documents: 50K docs × 250KB = 12.5 GB
+- Embeddings: 50K docs × 30 chunks × 6KB = 9 GB
+- Conversation history: 10K sessions × 8 turns × 3KB = 240 MB
+- Total per median customer: ~125 GB
+
+ALL CUSTOMERS (PLATFORM TOTAL):
+- Top 500 customers × 1.3 TB = 650 TB
+- Next 2,000 × 300 GB = 600 TB
+- Remaining 7,500 × 125 GB = 940 TB
+- TOTAL MANAGED DATA: ~2.2 PB
+- Growth: 40%/year (new customers + data volume growth)
+- 3-year projection: ~6 PB
 
 VECTOR DB SIZING:
-- 100 customers × 200K chunks × 1536-dim float32 = 
-  20M vectors × 6KB = 120 GB (fits in memory for fast retrieval)
-- With metadata: ~200 GB total vector storage
+- Total chunks: 10K customers × avg 1M chunks = 10B vectors
+- Storage: 10B × 1536-dim × float16 = 30 TB raw
+- With HNSW index overhead (2.5x): 75 TB
+- CANNOT fit in memory — need distributed vector DB:
+  Option A: Google Vertex AI Matching Engine (managed, scales to billions)
+  Option B: Weaviate/Milvus on GKE (50-node cluster, 1.5TB RAM each)
+  Option C: Custom ScaNN-based solution (Google's internal vector search)
+- MY CHOICE: Vertex AI Matching Engine for ease + Google Cloud Credits,
+  with per-tenant index sharding for isolation
+
+MULTI-REGION REPLICATION:
+- 3 active regions: US, EU, APAC
+- Full data replicated per region for data residency (6.6 PB total w/ 3x)
+- Vector indices: regional (queries go to nearest region)
+- Structured data: Spanner (global consistency, regional reads)
 ```
 
 ### Cost Modeling
 ```
-LLM COSTS (per query breakdown):
-┌──────────────────────────────────────────────────────────────┐
-│ Component           │ Tokens    │ Cost      │ Cacheable?     │
-├──────────────────────────────────────────────────────────────┤
-│ System prompt       │ 1,000     │ ~$0.003   │ YES (prefix)   │
-│ Retrieved context   │ 3,000     │ ~$0.009   │ Partially      │
-│ Conversation history│ 1,500     │ ~$0.005   │ YES (prefix)   │
-│ User query          │ 50        │ ~$0.000   │ NO             │
-│ Output generation   │ 500       │ ~$0.008   │ NO             │
-├──────────────────────────────────────────────────────────────┤
-│ TOTAL per query     │ ~6,000    │ ~$0.025   │               │
-│ With prefix caching │           │ ~$0.012   │ 50% savings    │
-│ With semantic cache │           │ ~$0.005   │ 80% hit rate   │
-└──────────────────────────────────────────────────────────────┘
+LLM COSTS AT GOOGLE SCALE:
+┌──────────────────────────────────────────────────────────────────────────┐
+│ Component              │ Volume      │ Unit Cost │ Daily Cost │ Strategy │
+├──────────────────────────────────────────────────────────────────────────┤
+│ Self-hosted Gemini     │ 5.4M q/day  │ $0.003    │ $16K       │ 60% of  │
+│ (TPU pods, simple)     │ (60%)       │           │            │ queries  │
+├──────────────────────────────────────────────────────────────────────────┤
+│ Self-hosted Gemini Pro │ 1.8M q/day  │ $0.008    │ $14K       │ 20%     │
+│ (TPU pods, medium)     │ (20%)       │           │            │ complex  │
+├──────────────────────────────────────────────────────────────────────────┤
+│ Frontier API (Claude/  │ 900K q/day  │ $0.025    │ $22K       │ 10%     │
+│ GPT-4, hardest queries)│ (10%)       │           │            │ hardest  │
+├──────────────────────────────────────────────────────────────────────────┤
+│ Semantic cache hit     │ 900K q/day  │ $0.0005   │ $450       │ 10%     │
+│ (no LLM call needed)   │ (10%)       │           │            │ repeated │
+├──────────────────────────────────────────────────────────────────────────┤
+│ TOTAL LLM              │ 9M q/day    │ $0.006avg │ $52K/day   │          │
+│ MONTHLY LLM            │ 270M q/mo   │           │ $1.6M/mo   │          │
+└──────────────────────────────────────────────────────────────────────────┘
 
-MONTHLY COST (steady state):
-- 36K queries/day × 30 days × $0.012 (with caching) = $13K/month (LLM)
-- Infrastructure (compute, vector DB, storage): ~$8K/month
-- Total: ~$21K/month
-- Revenue per customer: $50K+/year → healthy margin
+INFRASTRUCTURE COSTS:
+┌────────────────────────────────────────────────────────────────────────┐
+│ Component                   │ Spec                    │ Monthly Cost   │
+├─────────────────────────────┼─────────────────────────┼────────────────┤
+│ TPU pods (self-hosted LLMs) │ 16× v5e pods (256 chips)│ $800K          │
+│ Vector DB (Vertex Matching) │ 75 TB, 3 regions        │ $200K          │
+│ Spanner (structured data)   │ 2 PB, multi-region      │ $400K          │
+│ GCS (document storage)      │ 3 PB (w/ replication)   │ $60K           │
+│ Redis (caching layer)       │ 500 nodes, 50TB total   │ $150K          │
+│ GKE (app/orchestration)     │ 200 nodes, 3 regions    │ $100K          │
+│ Networking (cross-region)   │ ~50 TB/month egress     │ $100K          │
+│ Monitoring/observability    │ Cloud Ops at scale      │ $50K           │
+├─────────────────────────────┼─────────────────────────┼────────────────┤
+│ TOTAL INFRASTRUCTURE        │                         │ ~$1.86M/month  │
+│ + LLM COSTS                 │                         │ ~$1.6M/month   │
+│ GRAND TOTAL                 │                         │ ~$3.5M/month   │
+└────────────────────────────────────────────────────────────────────────┘
 
-SCALING CONCERN:
-- At 500 customers: $65K/month LLM + $30K infra = $95K/month
-- Need: aggressive caching, model routing (cheap model for simple queries)
+UNIT ECONOMICS:
+- Cost per customer: $3.5M ÷ 10K = $350/month avg
+- Revenue per customer: $15K-200K/year (tiered pricing)
+- Blended margin: 70-85% at scale (Google infrastructure advantage)
+- Break-even at: ~2,000 customers
+
+SCALING ECONOMICS (why this works at Google):
+- Self-hosted LLMs on TPUs are 5-10x cheaper than API calls at scale
+- Spanner/Bigtable pricing is internal (much cheaper than external cloud)
+- Shared infrastructure amortized across Google Cloud customers
+- Semantic caching improves with scale (more users → more cache hits)
 ```
 
 ---
@@ -3887,21 +3952,34 @@ CONS:
 WHEN TO CHOOSE: Mature product, complex use cases, accuracy > latency.
 ```
 
-### My Recommendation & Why:
+### My Recommendation & Why (At Google Scale):
 ```
-START with Approach B (Pipeline Router) because:
-1. Matches the 100-customer scale (need reliability, not just capability)
-2. Cost-optimizable (critical at $21K/month LLM costs)
-3. Debuggable (enterprise customers demand explainability)
-4. Team-scalable (each pipeline can be owned independently)
+CHOOSE Approach B (Pipeline Router) as the backbone because:
+1. At 10K QPS, you NEED independent pipeline scaling (analytics traffic 
+   bursts independently from RAG traffic)
+2. Cost control is existential at $3.5M/month — model routing saves 60%+
+3. At 10K customers, pipeline failures must be isolated (one bad pipeline 
+   can't take down the platform)
+4. 50+ engineer team can own pipelines independently (org-scalable)
+5. Each pipeline gets its own SLO, capacity planning, and on-call rotation
 
-EVOLVE toward Approach C for complex queries by:
-- Adding an "agent" pipeline alongside RAG/Analytics/Recommendation
-- Route only complex diagnostic queries to the agent pipeline
-- Keep simple queries on fast pipelines (80% of traffic)
+LAYER Approach C (Agent) for complex queries (10-15% of traffic):
+- Router identifies multi-step/diagnostic queries and routes to Agent tier
+- Agent tier runs on frontier models (more expensive, higher capability)
+- Agent queries have relaxed latency SLO (8s vs 2s for simple)
+- Agent tier auto-scales independently (bursty, GPU-hungry)
 
-This gives the best of both worlds: fast/cheap for simple queries,
-capable/expensive for complex queries.
+WHY NOT Approach A (Monolithic LLM-First) at this scale:
+- Single LLM call per query means EVERY query hits expensive model
+- At 9M queries/day, cost difference between model tiers = $100K+/day
+- No circuit breaker isolation: one bad prompt crashes everything
+- Can't independently scale query types (analytics vs docs vs recommendations)
+
+GOOGLE-SPECIFIC ADVANTAGES:
+- Self-hosted Gemini on TPUs for the simple query pipelines (5-10x cheaper)
+- Vertex AI pipeline orchestration for production deployment
+- Spanner for multi-region strong consistency (no eventual consistency bugs)
+- Internal bandwidth between services is free (co-located in Google DCs)
 ```
 
 ---
@@ -4117,96 +4195,147 @@ Example:
 └──────────────────┴───────────────────┴────────────────────────┴──────────────────────┘
 ```
 
-### Latency Budget Breakdown
+### Latency Budget Breakdown (Google-Scale Targets)
 ```
-TOTAL BUDGET: 10 seconds (simple), 15 seconds (complex)
+TOTAL BUDGET: p50 <2s (simple), p50 <5s (complex), p99 <8s (all)
+SLO: 99.9% of queries complete within 10 seconds
 
 Simple Query "What's our inventory of SKU-789?":
 ┌──────────────────────────────┬──────────┬──────────┐
 │ Step                         │ Time     │ Cumulative│
 ├──────────────────────────────┼──────────┼──────────┤
-│ API Gateway + Auth           │ 20ms     │ 20ms     │
-│ Query Classification         │ 50ms     │ 70ms     │
-│ Vector Search (retrieval)    │ 80ms     │ 150ms    │
-│ Reranking                    │ 100ms    │ 250ms    │
-│ Context Assembly             │ 30ms     │ 280ms    │
-│ LLM Generation (Haiku)       │ 1,500ms  │ 1,780ms  │
-│ Citation Verification        │ 200ms    │ 1,980ms  │
-│ Response Formatting          │ 20ms     │ 2,000ms  │
+│ Global LB + Edge routing     │ 5ms      │ 5ms      │
+│ Auth + Tenant resolution     │ 10ms     │ 15ms     │
+│ Semantic cache check         │ 15ms     │ 30ms     │
+│ Query Classification (local) │ 20ms     │ 50ms     │
+│ Vector Search (regional)     │ 40ms     │ 90ms     │
+│ Reranking (GPU, batched)     │ 50ms     │ 140ms    │
+│ Context Assembly             │ 10ms     │ 150ms    │
+│ LLM Generation (Gemini Nano) │ 800ms    │ 950ms    │
+│ Citation + Guard Check       │ 100ms    │ 1,050ms  │
+│ Response Formatting          │ 10ms     │ 1,060ms  │
 ├──────────────────────────────┼──────────┼──────────┤
-│ TOTAL                        │          │ ~2 sec   │
+│ TOTAL                        │          │ ~1.1 sec │
+│ (With streaming TTFB)        │          │ ~400ms   │
 └──────────────────────────────┴──────────┴──────────┘
 
-Complex Query "Why did we stockout last week?":
+Complex Query "Why did we stockout last week across all East Coast DCs?":
 ┌──────────────────────────────┬──────────┬──────────┐
 │ Step                         │ Time     │ Cumulative│
 ├──────────────────────────────┼──────────┼──────────┤
-│ API Gateway + Auth           │ 20ms     │ 20ms     │
-│ Query Classification         │ 50ms     │ 70ms     │
-│ PARALLEL:                    │          │          │
-│   Vector Search + Rerank     │ 180ms    │          │
-│   SQL Generation + Execution │ 3,000ms  │ 3,070ms  │
-│ Context Assembly             │ 50ms     │ 3,120ms  │
-│ LLM Synthesis (Opus)         │ 8,000ms  │ 11,120ms │
-│ Citation Verification        │ 500ms    │ 11,620ms │
-│ Response Formatting          │ 30ms     │ 11,650ms │
+│ Global LB + Edge routing     │ 5ms      │ 5ms      │
+│ Auth + Tenant resolution     │ 10ms     │ 15ms     │
+│ Query Classification         │ 20ms     │ 35ms     │
+│ Query Planning (Gemini Pro)  │ 500ms    │ 535ms    │
+│ PARALLEL EXECUTION:          │          │          │
+│   Vector Search + Rerank     │ 90ms     │          │
+│   SQL Gen + Spanner Query    │ 1,500ms  │          │
+│   Knowledge Graph traversal  │ 200ms    │ 1,735ms  │
+│ Context Assembly + Fusion    │ 30ms     │ 1,765ms  │
+│ LLM Synthesis (Gemini Ultra) │ 3,000ms  │ 4,765ms  │
+│ Citation + Safety Check      │ 200ms    │ 4,965ms  │
+│ Response Formatting          │ 15ms     │ 4,980ms  │
 ├──────────────────────────────┼──────────┼──────────┤
-│ TOTAL                        │          │ ~12 sec  │
+│ TOTAL                        │          │ ~5 sec   │
+│ (With streaming TTFB)        │          │ ~2 sec   │
 └──────────────────────────────┴──────────┴──────────┘
 
-OPTIMIZATION LEVERS:
-- Streaming: Send first tokens to user while still generating (perceived latency drops 60%)
-- Prefetching: While user is typing, pre-classify and pre-retrieve
-- Caching: Repeated queries hit cache in <100ms
-- Parallel: Run retrieval + SQL simultaneously (saves 3s on complex queries)
+Agent Query "Diagnose the root cause of our 15% cost increase this quarter":
+┌──────────────────────────────┬──────────┬──────────┐
+│ Step                         │ Time     │ Cumulative│
+├──────────────────────────────┼──────────┼──────────┤
+│ Auth + Classification        │ 35ms     │ 35ms     │
+│ Agent Planning (Gemini Ultra)│ 1,000ms  │ 1,035ms  │
+│ Sub-task 1: Cost breakdown   │ 2,000ms  │ 3,035ms  │
+│ Sub-task 2: Supplier changes │ 1,500ms  │ (parallel)│
+│ Sub-task 3: Volume analysis  │ 1,800ms  │ 3,035ms  │
+│ Synthesis + Recommendation   │ 2,500ms  │ 5,535ms  │
+│ Verification + Citations     │ 500ms    │ 6,035ms  │
+├──────────────────────────────┼──────────┼──────────┤
+│ TOTAL                        │          │ ~6 sec   │
+│ (With streaming TTFB)        │          │ ~2.5 sec │
+└──────────────────────────────┴──────────┴──────────┘
+
+KEY LATENCY OPTIMIZATIONS AT GOOGLE SCALE:
+- Streaming everywhere: First token in <500ms even for complex queries
+- Speculative execution: Start top-2 likely pipelines in parallel, cancel loser
+- Edge caching: Popular queries cached at CDN edge (CloudFlare/Cloud CDN)
+- Prefetching: Predict next query based on session context, pre-warm results
+- Connection pooling: Persistent gRPC streams to LLM serving (no cold start)
+- Regional locality: All data for a tenant co-located in one region
+- Batched inference: GPU batching for vector search + reranking (higher throughput)
+- KV-cache sharing: Multiple queries from same tenant share KV-cache prefix
 ```
 
 ---
 
 ## CAPACITY PLANNING
 
-### Horizontal Scaling Triggers
+### Horizontal Scaling Triggers (Google-Scale)
 ```
 SCALE SIGNAL → ACTION:
 
-Queries > 10 QPS sustained (5 min) →
-  Scale up orchestration service pods (K8s HPA)
+QPS > 5,000 sustained (1 min) →
+  Auto-scale LLM serving pods (GKE HPA + custom metrics)
+  Activate overflow to secondary TPU pod slices
   
-LLM latency p99 > 20s →
-  Activate secondary LLM provider
-  Enable request coalescing for similar queries
+LLM latency p99 > 8s →
+  Shed load: route overflow to cheaper/faster model tier
+  Enable request coalescing for semantically similar concurrent queries
+  Activate additional TPU pod slice in same region
 
-Vector DB latency p95 > 200ms →
-  Add read replica
-  Increase cache size for hot queries
+Vector DB latency p95 > 150ms →
+  Add shard replicas (Vertex Matching Engine auto-handles this)
+  Warm up cold tenant indices into memory
+  Consider index compaction if fragmented
 
-Ingestion lag > 4 hours →
-  Scale up CDC workers
-  Alert data team (potential source system issue)
+Cross-region latency p50 > 50ms →
+  Check inter-region replication lag
+  Consider promoting read replica to primary for affected region
 
-Cost per query > $0.05 avg (7-day rolling) →
-  Investigate: classifier pushing too many queries to expensive model?
-  Tune confidence thresholds for model routing
+Ingestion lag > 15 minutes →
+  Scale up Dataflow/CDC workers (auto-scaling with backlog-based metric)
+  Alert data platform team
+  Temporarily relax freshness SLO and notify affected tenants
 
-Human review queue > 500 items →
-  Investigate: accuracy degradation?
-  Retrain classifier / update retrieval index
+Cost per query > $0.012 avg (24h rolling) →
+  Investigate model routing distribution (target: 60% small, 20% medium, 10% large)
+  Check semantic cache hit rate (target: >75%)
+  Audit for query amplification (agent loops, retry storms)
+
+Global error rate > 0.1% (5 min window) →
+  Activate circuit breaker for degraded pipeline
+  Route traffic to healthy pipelines only
+  Page on-call SRE
 ```
 
-### Capacity Planning Table
+### Capacity Planning Table (Google-Scale Growth)
 ```
-┌──────────────┬──────────────┬──────────────┬──────────────┬──────────────┐
-│              │ 50 customers │ 200 customers│ 500 customers│ 1000 customers│
-├──────────────┼──────────────┼──────────────┼──────────────┼──────────────┤
-│ QPS (avg)    │ 0.3          │ 1.2          │ 3            │ 6            │
-│ QPS (peak)   │ 3            │ 12           │ 30           │ 60           │
-│ Vector DB    │ 120 GB       │ 500 GB       │ 1.2 TB       │ 2.5 TB       │
-│ LLM cost/mo  │ $7K          │ $28K         │ $65K         │ $130K        │
-│ Infra cost/mo│ $4K          │ $15K         │ $35K         │ $70K         │
-│ Engineers    │ 3-4          │ 6-8          │ 10-15        │ 20+          │
-│ Architecture │ Single-region│ Single-region│ Multi-region │ Multi-region │
-│              │ monolith     │ microservices│ microservices│ platform     │
-└──────────────┴──────────────┴──────────────┴──────────────┴──────────────┘
+┌──────────────┬──────────────┬──────────────┬──────────────┬──────────────────┐
+│              │ 1K customers │ 5K customers │ 10K customers│ 50K customers    │
+├──────────────┼──────────────┼──────────────┼──────────────┼──────────────────┤
+│ QPS (avg)    │ 100          │ 550          │ 1,100        │ 5,500            │
+│ QPS (peak)   │ 1,000        │ 5,500        │ 11,000       │ 55,000           │
+│ QPS (burst)  │ 5,000        │ 25,000       │ 50,000       │ 250,000          │
+│ Vector store │ 7.5 TB       │ 37 TB        │ 75 TB        │ 375 TB           │
+│ Spanner data │ 200 TB       │ 1 PB         │ 2 PB         │ 10 PB            │
+│ LLM cost/mo  │ $160K        │ $800K        │ $1.6M        │ $8M              │
+│ Infra cost/mo│ $200K        │ $900K        │ $1.9M        │ $9M              │
+│ Total cost/mo│ $360K        │ $1.7M        │ $3.5M        │ $17M             │
+│ TPU pods     │ 4            │ 8            │ 16           │ 64               │
+│ Engineers    │ 20           │ 50           │ 80           │ 200+             │
+│ Regions      │ 2            │ 3            │ 3            │ 5+               │
+│ Architecture │ Multi-region │ Multi-region │ Multi-region │ Federated global │
+│              │ microservices│ platform     │ platform     │ mesh             │
+│ Key concern  │ Cost optim.  │ Multi-tenancy│ Org scaling  │ Federated govern.│
+│              │              │ isolation    │              │                  │
+└──────────────┴──────────────┴──────────────┴──────────────┴──────────────────┘
+
+CRITICAL SCALING INFLECTION POINTS:
+- 1K→5K: Must move to self-hosted models (API cost becomes prohibitive)
+- 5K→10K: Must solve noisy neighbor problem (large tenants impact small ones)
+- 10K→50K: Must federate — no single team can own the whole system
+  Need platform team + pipeline teams + per-region ops teams
 ```
 
 
@@ -4253,14 +4382,15 @@ Human review queue > 500 items →
 15. "Any real-time data access constraints from POS systems?"
 
 ### Interviewer's Likely Answers:
-- Grocery retailer (perishable goods, daily replenishment)
-- 3 years of daily POS data, transaction-level
-- Promotions planned 2-4 weeks ahead
-- Under-forecasting costs 3x more than over-forecasting (stockouts are expensive)
-- "Near-real-time" = within 2 hours of demand signal change
-- Need probabilistic forecasts for safety stock calculations
-- GCP environment
-- Small data science team (3-4 people) — automation important
+- Google-scale retail platform: serving 500+ large retailers globally (think: Google Retail AI)
+- Top 50 retailers each have 1M+ SKUs, 10K+ locations = 10B+ time series across platform
+- 10 years of POS data, transaction-level, sub-second streaming ingestion
+- Promotions, markdowns, new product launches — all dynamic and real-time
+- Under-forecasting costs vary: 10x for perishables, 3x for general, asymmetric loss functions
+- "Near-real-time" = within 5 minutes of demand signal change (streaming architecture)
+- Need probabilistic forecasts (full quantile distributions) for downstream optimization
+- GCP-native, multi-region, leveraging TPUs and Vertex AI at scale
+- Fully automated ML platform — no per-customer data science needed (AutoML at scale)
 
 ---
 
@@ -4269,26 +4399,33 @@ Human review queue > 500 items →
 ```
 "Let me frame the problem quantitatively:
 
-SCALE:
-- 100K SKUs × 500 locations = 50 MILLION time series to forecast
-- Each needs 30-day-ahead daily predictions = 50M × 30 = 1.5B forecast values/day
-- POS data: ~10M transactions/day (500 stores × 20K transactions/store)
+SCALE (Google-Level — serving 500+ retailers):
+- Platform total: 500 retailers × avg 2M SKUs × avg 5K locations = 5 BILLION time series
+- Largest single customer: 10M SKUs × 50K locations = 500B time series
+- Each needs 30-day-ahead hourly predictions = 5B × 720 = 3.6 TRILLION forecast values/day
+- POS data: ~2B transactions/day across all retailers (500 retailers × 4M avg)
+- External signals: weather (10M grid points), events (50K/day), social (100M posts)
 
 LATENCY:
-- Batch forecast: Nightly run, ready by 6 AM for morning replenishment orders
-- Incremental update: Within 2 hours of demand signal change
+- Batch forecast: Rolling 4-hour windows (not nightly — continuous reforecasting)
+- Streaming update: Within 5 minutes of demand signal change
+- API serving: <50ms p99 for single SKU-location forecast retrieval
+- Bulk export: 1B forecasts delivered in <30 minutes to downstream systems
 
 ACCURACY TARGET:
-- Current baseline: ~65% MAPE at SKU-store-day level (typical for basic methods)
-- Target: <50% MAPE (each 1% improvement ≈ significant inventory cost reduction)
-- Note: grocery demand at SKU-day level is inherently noisy; 
-  aggregated accuracy will be much higher
+- Platform average wMAPE: <35% at SKU-store-day level
+- Per-customer SLA: contractual accuracy guarantees with financial penalties
+- Each 1% improvement at this scale = $500M+ in aggregate inventory savings
+- Must beat each customer's existing in-house forecasting within 90 days of onboarding
 
 COMPUTE BUDGET:
-- Training: 50M models × ~1 sec/model = ~14,000 compute-hours/week
-  (Or: 1 global model trained on all series = much cheaper)
-- Inference: 1.5B predictions in <6 hours = ~70K predictions/second
-  (This is achievable with batch inference on GPU cluster)
+- Training: 5B time series × global model approach = 500 TPU v5e chips for 6 hours
+  - Cannot do one-model-per-series at this scale (5B models × 0.5s = 79 years sequential!)
+  - Must use: global foundation model + fine-tuning per customer cluster
+- Inference: 3.6T predictions ÷ 4 hours = 250M predictions/second sustained
+  - This REQUIRES distributed batch inference across 1000+ TPU chips
+  - Online serving: 100K QPS for real-time forecast API (from pre-computed cache)
+- TOTAL COMPUTE: ~$2M/month in TPU/GPU time (amortized across 500 customers = $4K/customer)
 
 Does this framing align with what you're thinking?"
 ```
@@ -4683,81 +4820,130 @@ ALERTING:
 
 ---
 
-## DETAILED SCALE ESTIMATES
+## DETAILED SCALE ESTIMATES (GOOGLE-SCALE)
 
 ### Compute Requirements (Rigorous)
 ```
-THE FUNDAMENTAL MATH:
-- 100K SKUs × 500 locations = 50M forecasting units
-- Each unit needs 30 daily predictions = 1.5B prediction values/day
-- Each unit needs features: 50 lag features + 20 calendar + 10 external = 80 features
+THE FUNDAMENTAL MATH (PLATFORM-LEVEL):
+- 500 retailers × avg 2M SKUs × avg 5K locations = 5 BILLION forecasting units
+- Each unit needs 30 days × 24 hourly predictions = 720 prediction values
+- Total: 5B × 720 = 3.6 TRILLION forecast values per refresh cycle
+- Each unit needs features: 100 lag + 50 calendar/temporal + 30 external = 180 features
 
 TRAINING COMPUTE:
 
-Option A: One model per series (50M independent models)
-  - Training time per model: ~0.5 seconds (LightGBM on 1000 data points)
-  - Total: 50M × 0.5s = 25M seconds = 290 machine-days
-  - With 100 machines: 2.9 days
-  - Weekly retrain: barely feasible, need large cluster
+Option A: One model per series (5B independent models)
+  - Training time per model: ~0.5 seconds (LightGBM)
+  - Total: 5B × 0.5s = 2.5B seconds = 79 YEARS sequential
+  - Even with 10,000 machines: 29 days per retrain cycle
+  - INFEASIBLE. Cannot scale linearly with series count at Google scale.
 
-Option B: Global model (one model, all series as features)
-  - Training data: 50M series × 365 days × 3 years = 55B rows
-  - Training time: 4-8 hours on GPU cluster (100 GPUs)
-  - Much more feasible for weekly/daily retrain
-  - Also more accurate (cross-learning between similar series)
+Option B: Global foundation model (single transformer, all retailers)
+  - Training data: 5B series × 365 days × 5 years = 9.1 TRILLION data points
+  - Model: Transformer-based (like Google's TimesFM) with cross-series attention
+  - Parameters: 1-10B params (larger = better cross-learning)
+  - Training: 512 TPU v5e chips × 48 hours = 24,576 TPU-hours
+  - Weekly incremental retrain: 256 TPUs × 4 hours = 1,024 TPU-hours
+  - MASSIVE cross-learning: grocery in Tokyo improves grocery in Paris
+  - Accuracy: Best for stable demand, struggles with promotions
 
-Option C: Cluster-based (1000 clusters of similar SKUs, one model per cluster)
-  - Training: 1000 models × 30 min each = 500 hours
-  - With 50 machines: 10 hours
-  - Good balance of specialization and efficiency
+Option C: Hierarchical model zoo (MY CHOICE)
+  - 10 vertical-specific foundation models (grocery, fashion, electronics, pharma, etc.)
+  - Each: 64 TPUs × 12 hours = 768 TPU-hours per vertical
+  - Per-customer fine-tuning (top 50 customers with enough data):
+    50 × 8 TPUs × 2 hours = 800 TPU-hours total
+  - Remaining 450 customers: zero-shot from vertical model
+  - Promotion overlay model: separate GBM trained on promotion-specific features
+  - Total weekly training: ~10,000 TPU-hours = ~$50K/week
 
-MY CHOICE: Option B (global model) + Option C (cluster-based for promotions)
-  - Global model captures cross-series patterns efficiently
-  - Cluster-based promotion models capture category-specific promo effects
+WHY Option C at Google scale:
+  - Verticals have genuinely different demand patterns (perishable ≠ fashion)
+  - Top customers have enough data (billions of rows) to benefit from fine-tuning
+  - Smaller customers get 90% of accuracy from vertical model without custom training
+  - Isolates failures: one vertical's model breaking doesn't affect others
+  - Allows different SLAs per vertical (grocery needs hourly, fashion needs weekly)
+  - Matches org structure: separate teams per vertical
 
 INFERENCE COMPUTE:
-  - 50M predictions × 80 features × simple arithmetic = seconds on modern hardware
-  - Pre-compute nightly: batch inference on 100 machines = 15 minutes
-  - Store in Bigtable: 50M rows × (30 days × 3 quantiles) × 8 bytes = 36 GB
-  - Serve from cache: Redis with 36 GB fits in memory easily
+  - 3.6T predictions per cycle (every 4 hours)
+  - Pipeline: batch inference, prioritized by customer tier + freshness SLA
+  - Transformer inference on TPU: ~5000 predictions/chip/second (batched, 720-step)
+  - Throughput needed: 3.6T ÷ 14,400s (4 hours) = 250M predictions/second
+  - TPU chips needed: 250M ÷ 5000 = 50,000 chips if sustained... 
+    BUT: stagger across 4-hour window with priority queuing = 1,000 chips actual
+  - Pre-computed results: Bigtable (5B rows × 720 vals × 3 quantiles × 4 bytes = 43 TB)
+  - Hot cache: Memorystore Redis cluster (top 10% = 4.3 TB, 500 nodes)
+  - API: <10ms p99 for single SKU-location lookup (from cache/Bigtable)
+
+STREAMING UPDATES (5-minute freshness):
+  - 2B POS events/day = 23K events/sec avg, 500K/sec peak (Black Friday)
+  - Each event → feature update → Bayesian forecast adjustment (NOT full re-inference)
+  - Kalman filter update: O(1) per event — extremely cheap
+  - Only trigger full re-inference if deviation > 3σ from expected
+  - Streaming compute: 200 Dataflow workers (auto-scaling 50-500)
+  - Result: 5-minute p95 freshness, <1 minute for high-priority customers
 ```
 
 ### Storage Architecture
 ```
 RAW DATA:
-- POS transactions: 10M/day × 200 bytes = 2 GB/day = 730 GB/year
-- 3 years historical: 2.2 TB
-- Growth: 2 TB/year (more stores, more products)
+- POS transactions: 2B/day × 300 bytes = 600 GB/day = 219 TB/year
+- 5 years historical (all retailers): ~1.1 PB
+- External signals (weather 10M grid pts, events 50K/day, social 100M): 50 GB/day
+- Total raw growth: ~250 TB/year
 
 FEATURE STORE:
-- Offline (training): 50M units × 80 features × 1095 days × 8 bytes = 44 TB
-  → Stored in Parquet on GCS, partitioned by date
-  → Only load recent 90 days for training = 4 TB active
+- Offline (training):
+  5B units × 180 features × 1825 days × 4 bytes (float16) = 6.6 PB raw
+  → Parquet on GCS, partitioned by retailer_id/date (3-4x compression): ~2 PB
+  → Active training window (365 days): 400 TB compressed
+  → Access via BigQuery federated queries (no data duplication)
 
-- Online (serving): 50M units × 80 features × 8 bytes = 32 GB
-  → Fits in Redis cluster (3 nodes × 16 GB)
-  → Refresh every 2 hours from stream processor
+- Online (serving): 
+  5B units × 180 features × 4 bytes = 3.6 TB
+  → TOO LARGE for pure Redis — use Bigtable SSD (sub-10ms reads)
+  → Hot tier (top 100 retailers, 50% of queries): 800 GB in Memorystore
+  → Refresh: Continuous streaming via Dataflow (< 5 min lag)
 
 FORECAST OUTPUT:
-- 50M units × 30 days × 3 quantiles × 8 bytes = 36 GB
-  → Pre-computed nightly, stored in Bigtable + Redis cache
-  → API serves from Redis (sub-ms latency for reads)
+- 5B units × 720 hourly forecasts × 3 quantiles × 4 bytes = 43 TB
+  → Primary: Bigtable (auto-sharded, handles 500K+ reads/sec globally)
+  → Cache: Redis for top 10% (4.3 TB across 500 Redis nodes)
+  → Bulk export: GCS Parquet for customers who pull daily (43 TB/export)
+  → API: <5ms from Redis, <15ms from Bigtable (p99)
 
 TOTAL INFRASTRUCTURE:
-┌─────────────────────────────────────────────────┐
-│ Component        │ Size    │ Service     │ Cost/mo│
-├──────────────────┼─────────┼─────────────┼────────┤
-│ Raw data (hot)   │ 730 GB  │ BigQuery    │ $3K    │
-│ Raw data (cold)  │ 2.2 TB  │ GCS (cold)  │ $50    │
-│ Feature store    │ 4 TB    │ GCS + Redis │ $2K    │
-│ Forecast output  │ 36 GB   │ Bigtable    │ $500   │
-│ Online features  │ 32 GB   │ Redis       │ $800   │
-│ Training cluster │ 100 GPU │ Vertex AI   │ $15K   │
-│ Stream processing│ 10 nodes│ Flink/GKE   │ $3K    │
-│ Monitoring       │ —       │ Grafana+Prom│ $500   │
-├──────────────────┼─────────┼─────────────┼────────┤
-│ TOTAL            │         │             │ ~$25K  │
-└─────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────┐
+│ Component           │ Size         │ Service           │ Cost/month   │
+├─────────────────────┼──────────────┼───────────────────┼──────────────┤
+│ Raw data (hot, 90d) │ 54 TB        │ BigQuery          │ $80K         │
+│ Raw data (cold)     │ 1.1 PB       │ GCS (Coldline)    │ $5K          │
+│ Feature store (off) │ 2 PB (compr) │ GCS + BigQuery    │ $50K         │
+│ Feature store (on)  │ 3.6 TB       │ Bigtable SSD      │ $120K        │
+│ Forecast output     │ 43 TB        │ Bigtable+Redis    │ $200K        │
+│ Redis cache cluster │ 4.3 TB       │ Memorystore       │ $180K        │
+│ Training cluster    │ 1000 TPU v5e │ Vertex AI         │ $600K        │
+│ Inference cluster   │ 1000 TPU v5e │ Vertex AI (batch) │ $500K        │
+│ Streaming (Dataflow)│ 200 workers  │ Dataflow          │ $120K        │
+│ API serving (GKE)   │ 100 nodes    │ GKE (3 regions)   │ $80K         │
+│ Monitoring + MLOps  │ —            │ Vertex AI Pipelines│ $50K         │
+│ Networking (egress) │ ~100 TB/mo   │ Cloud Interconnect│ $50K         │
+├─────────────────────┼──────────────┼───────────────────┼──────────────┤
+│ TOTAL               │              │                   │ ~$2.0M/month │
+│ Per customer (avg)  │              │                   │ ~$4K/month   │
+│ Revenue/customer    │              │                   │ $20-500K/year│
+└───────────────────────────────────────────────────────────────────────┘
+
+UNIT ECONOMICS AT GOOGLE SCALE:
+- Total platform cost: $24M/year
+- Revenue (500 customers × avg $100K): $50M/year → 52% gross margin early
+- At 2000 customers: Cost grows ~2x ($48M), Revenue 4x ($200M) → 76% margin
+- Sub-linear cost scaling because:
+  - Foundation models shared across customers (training amortized)
+  - Bigtable/Spanner get cheaper per byte at scale
+  - TPU pods are more efficient at larger batch sizes
+  - Cross-learning improves accuracy without more compute
+```
 ```
 
 ---
@@ -5188,43 +5374,56 @@ ROLLBACK MECHANISM:
 14. "GCP/AWS/on-prem?"
 15. "Existing infrastructure we should integrate with?"
 
-### Expected Answers:
-- Single large enterprise initially, expanding to multi-tenant later
-- 5M events/day currently, growing to 50M within 18 months
-- Mix of sources: APIs, webhooks, batch files, IoT sensors
-- Detection within 5 minutes acceptable
-- Initial actions: alert only. Phase 2: auto-actions for low-risk decisions
-- GCP environment
-- Some events arrive out of order (shipment updates can be delayed)
+### Expected Answers (Google-Scale):
+- Google-scale multi-tenant platform: 1,000+ enterprise supply chains monitored simultaneously
+- 5 BILLION events/day currently (across all tenants), growing to 50B within 18 months
+- Mix of sources: APIs, webhooks, CDC streams, IoT sensors (100M+ devices), satellite feeds
+- Detection within 30 seconds for critical anomalies, 5 minutes for standard
+- Auto-actions from day one for well-understood patterns (reroute, reorder, alert)
+- GCP-native, multi-region (us, eu, asia), leveraging Pub/Sub + Dataflow at extreme scale
+- Massive out-of-order: IoT can be hours late, carrier feeds batchy, global timezone skew
 
 ---
 
 ## PHASE 2: Requirements Summary & Math (3 minutes)
 
 ```
-"Let me quantify this:
+"Let me quantify this at Google scale:
 
 SCALE:
-- Current: 5M events/day = ~58 events/sec avg, ~300/sec peak
-- Target (18 mo): 50M events/day = 580 events/sec avg, 3000/sec peak
-- This is well within Kafka's capacity (millions/sec)
+- Current: 5B events/day = ~58,000 events/sec avg
+- Peak (Black Friday, Chinese NY, disruptions): 10x = 580,000 events/sec
+- Burst (major global event — Suez canal, pandemic): 20x = 1.16M events/sec
+- Target (18 mo): 50B events/day = 580K events/sec avg, 5.8M/sec peak
+- This requires: Pub/Sub (unlimited) + Dataflow (auto-scaling) — Kafka alone won't work
 
 EVENT SIZE:
-- Avg event: 500 bytes (JSON with metadata)
-- Daily storage: 50M × 500B = 25 GB/day = 9 TB/year
-- Retention: 90 days hot + archive
+- Avg event: 600 bytes (Protobuf with metadata, enrichment fields)
+- Daily ingestion: 5B × 600B = 3 TB/day = 1.1 PB/year
+- At 50B/day target: 30 TB/day = 11 PB/year
+- Retention: 30 days hot (Bigtable), 1 year warm (BigQuery), 7 years cold (GCS)
 
 ANOMALY DETECTION:
-- 50M events/day, assume 0.1% are anomalous = 50K potential anomalies
-- With 95% precision target: 2,500 false positives/day ≈ 100/hour
-- That's still too many for humans → need intelligent grouping and severity
+- 5B events/day, 0.1% anomalous = 5M potential anomalies/day
+- After correlation + dedup: 500K unique anomaly patterns/day
+- After severity filtering: 50K actionable alerts/day
+- Per customer (1000 tenants): ~50 alerts/day avg (manageable)
+- With 95% precision: 2,500 false positives/day across platform = 2.5/customer
 
-LATENCY BUDGET:
-- Event ingestion: <1 sec
-- Processing + enrichment: <1 min
-- Anomaly detection: <3 min
-- Alert delivery: <1 min
-- Total: <5 min end-to-end ✓
+ENTITY SCALE:
+- 1000 tenants × avg 500K entities each = 500M entities tracked globally
+- State per entity: running statistics, baselines, thresholds = 500 bytes
+- Total stateful computation: 500M × 500B = 250 GB of streaming state
+- This is LARGE for streaming — needs distributed state (Bigtable-backed)
+
+LATENCY BUDGET (30-second SLO for critical):
+- Event ingestion (Pub/Sub): <100ms
+- Processing + enrichment: <5 sec
+- Anomaly detection (streaming): <10 sec
+- Correlation + severity: <10 sec
+- Alert delivery: <5 sec
+- Total: <30 sec end-to-end for critical path ✓
+- Standard path (5 min SLO): allows batch ML models in the loop
 
 Does this match your expectations?"
 ```
@@ -5633,70 +5832,111 @@ Phase 4 (12+ months): Self-healing supply chain
 
 ---
 
-## RIGOROUS SCALE ESTIMATES
+## RIGOROUS SCALE ESTIMATES (GOOGLE-SCALE)
 
 ### Event Volume Modeling
 ```
-SOURCE BREAKDOWN (50M events/day target):
-┌──────────────────────────────────────────────────────────────────┐
-│ Source              │ Events/day │ Avg Size │ Pattern              │
-├─────────────────────┼────────────┼──────────┼──────────────────────┤
-│ Warehouse WMS       │ 15M        │ 400B     │ Steady during shifts │
-│ Carrier tracking    │ 12M        │ 600B     │ Batchy (hourly dumps)│
-│ POS/store events    │ 10M        │ 300B     │ Peaks at meal times  │
-│ IoT sensors         │ 8M         │ 200B     │ Continuous, uniform  │
-│ ERP changes (CDC)   │ 3M         │ 800B     │ Business hours heavy │
-│ Supplier updates    │ 2M         │ 500B     │ Random, bursty       │
-├─────────────────────┼────────────┼──────────┼──────────────────────┤
-│ TOTAL               │ 50M        │ ~420B avg│                      │
-└──────────────────────────────────────────────────────────────────┘
+SOURCE BREAKDOWN (5B events/day — current, Google-scale platform):
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ Source              │ Events/day  │ Avg Size │ Pattern                        │
+├─────────────────────┼─────────────┼──────────┼────────────────────────────────┤
+│ IoT sensors         │ 2B          │ 200B     │ Continuous, 100M+ devices      │
+│ Warehouse WMS       │ 1B          │ 400B     │ Burst during shifts, 50K sites │
+│ Carrier tracking    │ 800M        │ 600B     │ Batchy + streaming (GPS)       │
+│ POS/store events    │ 500M        │ 300B     │ Peaks at meal/shopping times   │
+│ ERP CDC streams     │ 400M        │ 800B     │ Business hours heavy           │
+│ Supplier updates    │ 200M        │ 500B     │ Global, 24/7                   │
+│ External (weather,  │ 100M        │ 1KB      │ Periodic pulls + push alerts   │
+│  news, maritime)    │             │          │                                │
+├─────────────────────┼─────────────┼──────────┼────────────────────────────────┤
+│ TOTAL               │ 5B          │ ~600B avg│ 58K events/sec avg             │
+└──────────────────────────────────────────────────────────────────────────────┘
 
 THROUGHPUT MATH:
-- Average: 50M/day ÷ 86,400 = 580 events/sec
-- Peak (Black Friday, shift change, carrier batch dump):
-  - 10x average = 5,800 events/sec
-  - Burst (carrier dumps 6 hours of data): 20x for 5 minutes = 11,600/sec
-- Kafka can handle 1M+ events/sec per broker → COMFORTABLE
+- Average: 5B/day ÷ 86,400 = 58,000 events/sec
+- Peak (Black Friday + Chinese NY overlap, global disruption):
+  - 10x average = 580,000 events/sec
+  - Burst (cascading failures, major port closure): 20x = 1.16M events/sec
+- At 50B/day target (18 months): 580K avg, 5.8M/sec peak
+
+WHY KAFKA ALONE WON'T WORK AT THIS SCALE:
+  - Kafka can handle 1M+/sec per cluster, BUT:
+  - Multi-region replication at 580K/sec = massive cross-region bandwidth
+  - Topic management for 1000 tenants × 50 event types = 50K topics
+  - Operational burden of managing 100+ Kafka brokers across 3 regions
+  
+  SOLUTION: Google Pub/Sub as ingestion layer (serverless, unlimited throughput)
+  - Pub/Sub → Dataflow (streaming) for processing
+  - Kafka only for internal pub-sub between microservices where ordering matters
+  - Pub/Sub handles: global routing, per-tenant topics, automatic scaling
 
 STORAGE:
-- Raw events: 50M × 420B = 21 GB/day
-- 90-day hot storage: 1.9 TB (BigQuery or Bigtable)
-- 7-year cold archive: 55 TB (GCS, compressed: ~15 TB)
-- Processed/enriched events: 2x raw size = 42 GB/day (metadata added)
-- Aggregated metrics: <1 GB/day (time-series rollups)
+- Raw events: 5B × 600B = 3 TB/day
+- 30-day hot (Bigtable): 90 TB (with TTL auto-deletion)
+- 1-year warm (BigQuery): 1.1 PB (queryable, compressed ~300 TB)
+- 7-year cold archive (GCS Coldline): 7.7 PB (compressed ~2 PB)
+- Enriched events (2x raw): 6 TB/day (stored alongside raw)
+- Aggregated metrics: 50 GB/day (time-series rollups per entity per minute)
+- Total storage footprint: ~3 PB active, ~10 PB archive
 ```
 
 ### Anomaly Detection Scaling
 ```
-DETECTION PIPELINE COMPUTE:
+DETECTION PIPELINE COMPUTE (at 58K events/sec):
 
-Layer 1 (Rules): 
-  - 200 rules evaluated per event
-  - CPU cost: ~10μs per event (simple comparisons)
-  - 5,800 events/sec peak × 10μs = 58ms of CPU per second
-  - 1 core handles this easily
+Layer 1 (Rules — stateless): 
+  - 500 rules evaluated per event (tenant-specific + global)
+  - CPU cost: ~5μs per event per rule, but batched: ~20μs total per event
+  - 58K events/sec × 20μs = 1.16 CPU-seconds per second
+  - 2 CPU cores handle this easily per region (TRIVIAL)
   
-Layer 2 (Statistical):
-  - Per-entity Z-score requires state (running mean, stddev)
-  - Entities: 100K SKUs × 500 locations = 50M entities
-  - State per entity: 100 bytes (mean, variance, count, window)
-  - Total state: 50M × 100B = 5 GB
-  - Fits in Flink's RocksDB state backend
-  - Cost: ~50μs per event (hash lookup + math)
+Layer 2 (Statistical — stateful):
+  - Per-entity Z-score, moving averages, seasonal decomposition
+  - Entities: 500M globally (1000 tenants × 500K entities avg)
+  - State per entity: 500 bytes (multi-metric baselines)
+  - Total state: 500M × 500B = 250 GB
+  - TOO LARGE for in-memory (Flink RocksDB state max practical: ~50GB/TM)
+  - SOLUTION: External state in Bigtable (10ms reads) with local LRU cache
+    - Hot entities (1% actively updating): 5M × 500B = 2.5 GB (fits in cache)
+    - Cold entities: lazy load from Bigtable on first event
+  - Cost: ~200μs per event (cache hit) to ~10ms (Bigtable lookup)
+  - Throughput: 58K/sec × 200μs avg = 11.6 CPU-sec/sec = 12 cores
   
-Layer 3 (ML):
-  - Isolation Forest inference: ~1ms per event batch (batch of 100)
-  - 5,800 events/sec ÷ 100 batch = 58 inferences/sec
-  - Single GPU: can do 10K+ inferences/sec → one GPU is enough
-  - Sequence model: more expensive, ~5ms per sequence evaluation
-  - Only trigger on suspicious entities (pre-filtered): ~500/sec
-  - Cost: 1-2 GPUs
+Layer 3 (ML — GPU-accelerated):
+  - Isolation Forest + LSTM sequence models
+  - Only triggered for events that pass L1+L2 (pre-filtered to ~1% = 580/sec)
+  - Batch inference: groups of 64 events every 110ms
+  - Single A100 GPU: ~10K inferences/sec → handles this easily
+  - Sequence model (contextual anomaly): processes entity timelines
+    - 500M entities, but only active subset matters: ~5M/day update
+    - Batch re-score hourly: 5M × 500ms = 2.5M seconds ÷ 3600 = 700 GPUs
+    - OR: trigger only on L2 alerts = 50K/day → single GPU, <1 hour
+  
+Layer 4 (LLM-based — for novel anomalies, Google-scale addition):
+  - For anomalies that don't match known patterns (truly novel)
+  - Feed entity context + recent events to Gemini for reasoning
+  - Volume: ~500 novel cases/day (1 in 10K anomalies)
+  - Cost: $0.05/assessment × 500 = $25/day (trivial at this scale)
+  - Value: catches black swan events no rule or statistical model can
 
-TOTAL COMPUTE FOR DETECTION:
-  - 4-8 Flink TaskManagers (4 CPU, 16 GB each) for L1+L2
-  - 2 GPU instances for L3 (can be preemptible for cost savings)
-  - Cost: ~$5K/month compute
+TOTAL COMPUTE FOR DETECTION (per region):
+  - 50 Dataflow workers (L1+L2), auto-scaling 20-200
+  - 4 GPU instances (L3 ML inference)
+  - 2 LLM API connections (L4 novel detection)
+  - Bigtable state cluster: 50 nodes (250 GB state + read throughput)
+  - Cost: ~$200K/month per region × 3 regions = $600K/month
+
+DETECTION FUNNEL (daily, platform-wide):
+  5B events → 50M pass L1 (1%) → 5M pass L2 (10% of L1)
+  → 500K confirmed anomalies (10% of L2) → 50K actionable alerts (10%)
+  → 5K auto-actions triggered → 500 escalations to humans
+
+  Per customer (1000 tenants):
+  5M events → 50K L1 → 5K L2 → 500 anomalies → 50 alerts → 5 auto-actions
+  THIS IS MANAGEABLE. The filtering cascade is the key design insight.
 ```
+
+---
 
 ---
 
@@ -6052,32 +6292,53 @@ WHY NOT ML CLUSTERING:
 
 ---
 
-## CAPACITY PLANNING FOR GROWTH
+## CAPACITY PLANNING FOR GROWTH (GOOGLE-SCALE)
 
 ```
-┌──────────────┬──────────┬──────────┬──────────┬───────────────────────┐
-│              │ Year 0   │ Year 1   │ Year 2   │ Scaling Action        │
-├──────────────┼──────────┼──────────┼──────────┼───────────────────────┤
-│ Events/day   │ 5M       │ 50M      │ 200M     │ Add Kafka brokers     │
-│ Peak QPS     │ 300      │ 5,800    │ 23,000   │ More Flink parallelism│
-│ Entities     │ 1M       │ 50M      │ 200M     │ Shard state backend   │
-│ Storage/day  │ 2 GB     │ 21 GB    │ 84 GB    │ Tiered (hot→warm→cold)│
-│ Anomalies/day│ 5K       │ 50K      │ 200K     │ Better grouping/filter│
-│ Alerts/day   │ 50       │ 500      │ 2000     │ ML severity, auto-act │
-│ Kafka brokers│ 3        │ 6        │ 12       │ Linear with throughput│
-│ Flink TMs    │ 2        │ 8        │ 20       │ Linear with QPS       │
-│ Monthly cost │ $3K      │ $15K     │ $45K     │                       │
-└──────────────┴──────────┴──────────┴──────────┴───────────────────────┘
+┌──────────────┬──────────────┬──────────────┬──────────────┬─────────────────────────────┐
+│              │ Year 0       │ Year 1       │ Year 2       │ Scaling Action              │
+├──────────────┼──────────────┼──────────────┼──────────────┼─────────────────────────────┤
+│ Events/day   │ 5B           │ 20B          │ 50B          │ Pub/Sub auto-scales         │
+│ Peak events/s│ 580K         │ 2.3M         │ 5.8M         │ Dataflow auto-scaling       │
+│ Tenants      │ 200          │ 500          │ 1,000        │ Namespace isolation          │
+│ Entities     │ 100M         │ 300M         │ 500M         │ Bigtable-backed state       │
+│ Storage/day  │ 3 TB         │ 12 TB        │ 30 TB        │ Tiered (hot→warm→cold)      │
+│ Anomalies/day│ 1M           │ 3M           │ 5M           │ ML filtering + correlation  │
+│ Alerts/day   │ 10K          │ 30K          │ 50K          │ Intelligent grouping        │
+│ Auto-actions │ 1K           │ 5K           │ 15K          │ Confidence-gated expansion  │
+│ Pub/Sub tput │ Auto         │ Auto         │ Auto         │ Serverless (unlimited)      │
+│ Dataflow wrk │ 100          │ 300          │ 800          │ Auto-scale with backlog     │
+│ Bigtable nds │ 50           │ 150          │ 400          │ Scale with entity count     │
+│ GPU (ML)     │ 8            │ 20           │ 50           │ Scale with anomaly volume   │
+│ Monthly cost │ $600K        │ $1.5M        │ $3.5M        │                             │
+│ Cost/tenant  │ $3K          │ $3K          │ $3.5K        │ Sub-linear per-tenant cost! │
+│ Revenue/tent │ $15K         │ $20K         │ $25K         │ Expand with value delivered  │
+└──────────────┴──────────────┴──────────────┴──────────────┴─────────────────────────────┘
 
-KEY INSIGHT: Cost scales linearly with events, NOT with anomalies.
-The anomaly detection FILTERS data — downstream (alerting, actions) 
-handles a tiny fraction of the event volume.
+KEY INSIGHTS AT GOOGLE SCALE:
 
-At Year 2 (200M events/day):
-- Ingestion + processing: $35K/month (scales with event volume)
-- Anomaly detection: $5K/month (scales with entity count)
-- Alerting + actions: $3K/month (scales with anomaly count — small!)
-- Storage: $2K/month (tiered — most data in cold storage)
+1. Cost scales with EVENTS, not anomalies (same as before, just 1000x bigger)
+   - Ingestion + processing: 80% of cost (scales linearly with event volume)
+   - Detection (stateful): 15% of cost (scales with entity count, sub-linear)
+   - Actions + alerting: 5% of cost (scales with anomaly count — tiny!)
+
+2. Per-tenant cost DECREASES with scale:
+   - Shared infrastructure (Pub/Sub, Dataflow, Bigtable) amortized
+   - ML models shared across tenants (transfer learning on anomaly patterns)
+   - Operational team size grows sub-linearly (automation improves)
+
+3. At Year 2 ($3.5M/month):
+   - Ingestion + Dataflow: $2M/month (58% — dominated by compute)
+   - Bigtable (state + storage): $800K/month (23%)
+   - GPU/ML inference: $400K/month (11%)
+   - Alerting + actions: $150K/month (4%)
+   - Networking/egress: $150K/month (4%)
+
+4. CRITICAL SCALING INFLECTION POINTS:
+   - 1B events/day: Kafka becomes operational burden → migrate to Pub/Sub
+   - 100M entities: In-memory state impossible → Bigtable-backed state
+   - 10K alerts/day/tenant: Human review impossible → ML severity scoring mandatory
+   - 1M auto-actions/day: Need formal verification of action safety
 ```
 
 
@@ -6122,45 +6383,61 @@ At Year 2 (200M events/day):
 13. "Do they need to see alternatives (route A vs B vs C) or just the best recommendation?"
 14. "How far in advance are shipments planned vs on-demand?"
 
-### Expected Answers:
-- Multi-modal global logistics for a single large enterprise (expandable later)
-- 10,000 shipments/day, routes can span 5+ countries
-- Optimize for cost with delivery time constraints (SLA)
-- Must handle disruptions with real-time re-routing
-- Logistics planners review and approve recommendations
-- Mix of planned (80%) and urgent (20%) shipments
+### Expected Answers (Google-Scale):
+- Google-scale logistics platform serving 2,000+ enterprises globally
+- 10 MILLION shipments/day across all customers (think: all of global trade visible)
+- Routes span 200+ countries, 50K+ nodes (ports, warehouses, hubs, cross-docks)
+- Multi-objective: cost, time, carbon, risk — customer-configurable weights
+- Must handle cascading disruptions (Suez-scale) affecting 100K+ shipments simultaneously
+- Mix of autonomous (60%, pre-approved rules), planner-reviewed (30%), urgent manual (10%)
+- Real-time re-optimization: sub-second decision for urgent, <5 min for batch re-routes
 
 ---
 
 ## PHASE 2: Requirements & Math (3 minutes)
 
 ```
-"Let me frame the problem:
+"Let me frame the problem at Google scale:
 
 SCALE:
-- 10K shipments/day needing route optimization
-- Each route has 10-50 possible options (mode × carrier × path combinations)
-- Route network: ~1000 nodes (warehouses, ports, hubs, DCs), ~10K edges
-- Re-routing: ~500 shipments/day affected by disruptions
+- 10M shipments/day needing route optimization (across 2000 enterprise customers)
+- Route network: 50,000 nodes (every port, warehouse, hub, cross-dock globally)
+- 500,000 edges (all feasible transport links between nodes)
+- Each shipment: 100-500 possible route options (mode × carrier × path × timing)
+- Re-routing: 500K shipments/day affected by disruptions (5% of active)
+- In-transit inventory: 2M shipments moving at any moment, all tracked real-time
 
 COMPUTE:
-- Batch optimization (nightly for next-day planned shipments): 
-  8K shipments × graph search = must complete in <2 hours
-- Real-time routing (urgent + re-routes):
-  ~100 requests/hour × <5 seconds response time
-- This is a combinatorial optimization problem that's NP-hard in general,
-  but solvable with heuristics at this scale
+- Batch optimization (rolling 4-hour windows, not just nightly):
+  8M planned shipments × constrained path search = continuous pipeline
+  Must produce initial routes within 15 minutes of booking
+- Real-time routing (urgent + re-routes + dynamic repricing):
+  ~50,000 requests/hour = 14 requests/second sustained
+  Response time: <2 seconds for single shipment, <30 seconds for fleet re-opt
+- Fleet-level VRP: 10M shipments, 100K vehicles, time windows, multi-modal
+  NP-hard at this scale — need hierarchical decomposition
+
+GRAPH COMPLEXITY:
+- Time-expanded graph: 50K nodes × 168 hours (weekly) × 4 time-slots/hour
+  = 33.6M time-nodes, ~100M time-edges
+- With dynamic costs (changing every 15 min): graph REBUILDS every 15 minutes
+- Memory: 100M edges × 200 bytes (attributes) = 20 GB per graph instance
+- Need: 3 regions × current + next period = 6 graph instances in memory
 
 COST FACTORS:
-- Transport cost: $0.50-$5.00/km (varies by mode)
-- Time cost: $X/hour of inventory in transit (opportunity cost)
-- Risk cost: probability of disruption × impact
-- Penalty cost: SLA violation = $Y per day late
+- Transport cost: $0.50-$50/km (air vs ocean, 100x range)
+- Carbon cost: $50-150/tonne CO₂ (configurable per customer)
+- Time cost: $X/hour × inventory value (can be $10K/hour for electronics)
+- Risk cost: P(disruption) × E(impact) — ML-predicted per edge
+- Penalty cost: SLA violation = contractual damages ($10K-$1M per shipment)
+- Total logistics cost managed: ~$500B/year across all customers on platform
 
 DATA FRESHNESS:
-- Carrier rates: update daily
-- Real-time: traffic, weather, port congestion (update every 15 min)
-- Disruptions: immediate (event-driven)
+- Carrier rates: real-time via API (spot market changes every hour)
+- Traffic/weather/port: every 5 minutes (streaming from event platform)
+- Disruptions: sub-30-second propagation (from event processing system)
+- Fuel prices: hourly updates
+- Carbon factors: daily updates per route/mode
 
 Am I framing this correctly?"
 ```
@@ -6545,82 +6822,128 @@ Evolution path:
 
 ---
 
-## RIGOROUS SCALE ESTIMATES
+## RIGOROUS SCALE ESTIMATES (GOOGLE-SCALE)
 
 ### Route Optimization Compute
 ```
-PROBLEM SIZING:
-- 10K shipments/day needing routing
-- Route network: 1,000 nodes, 10K edges
-- Time-expanded graph (168 hours × hourly granularity): 
-  1,000 × 168 = 168K time-nodes, ~500K time-edges
-- Each shipment needs: 10-50 candidate routes evaluated
+PROBLEM SIZING (10M shipments/day, 50K nodes, 500K edges):
+- Time-expanded graph: 50K nodes × 672 time-slots (weekly, 15-min granularity)
+  = 33.6M time-nodes, ~100M time-edges
+- Each edge: 200 bytes (cost, time, capacity, risk, carbon, carrier, constraints)
+- Graph memory: 100M × 200B = 20 GB per instance
+- Dynamic rebuild every 15 minutes (costs change with real-time signals)
 
 SINGLE SHIPMENT ROUTING:
-  Graph: 168K nodes, 500K edges
-  Algorithm: Constrained A* (or Dijkstra with constraints)
-  Time: O((V + E) × log V) = O(500K × 18) ≈ 9M operations
-  At 1 GHz effective throughput: ~9ms per routing request
-  With constraint checking overhead: ~50-100ms per shipment
+  Graph: 33.6M nodes, 100M edges
+  Algorithm: Constrained A* with multi-objective Pareto (cost, time, risk, carbon)
+  Complexity: O((V + E) × log V) = O(100M × 25) ≈ 2.5B operations
+  At 1 GHz effective: ~2.5 seconds per shipment (TOO SLOW for real-time!)
   
-BATCH ROUTING (nightly, all planned shipments):
-  8,000 planned shipments × 100ms = 800 seconds = 13 minutes (sequential)
-  With 50 parallel workers: 16 seconds
-  This is FAST. Single-shipment routing is not the bottleneck.
+  OPTIMIZATION FOR GOOGLE SCALE:
+  1. Hierarchical routing: Region → Country → Local (3-level decomposition)
+     - Level 1 (continental): 500 super-nodes, <10ms
+     - Level 2 (national): 5K nodes per region, <50ms
+     - Level 3 (local): 2K nodes, <20ms
+     - Total: <100ms per shipment (25x faster than flat graph)
+  2. Pre-computed route templates: top 10K origin-destination pairs cached
+     - Covers 80% of shipments → <5ms lookup + constraint validation
+  3. Graph pruning: given origin/destination, prune to relevant subgraph
+     - 100M edges → ~500K relevant edges per query
 
-FLEET OPTIMIZATION (THE HARD PROBLEM):
-  Vehicle Routing Problem (VRP) with:
-  - 200 vehicles, 8K shipments, time windows, capacity, multi-modal
-  - NP-hard → can't solve optimally at this scale
-  - Heuristic: Large Neighborhood Search (LNS)
-    - Start with greedy assignment
-    - Iteratively destroy + repair segments
-    - 1000 iterations × 8K evaluations = 8M evaluations
-    - With efficient data structures: ~30 minutes to converge
-    - Quality: within 5-10% of optimal (vs 30%+ for greedy alone)
-    
+BATCH ROUTING (rolling 4-hour windows):
+  8M planned shipments per window (80% of daily volume)
+  With template cache (80% hit): 1.6M need full routing
+  1.6M × 100ms = 160,000 seconds sequential
+  With 1000 parallel workers: 160 seconds (< 3 minutes) ✓
+  Template hits (6.4M): batch validate constraints = 30 seconds on 100 workers
+
+FLEET-LEVEL VRP (THE HARD PROBLEM AT GOOGLE SCALE):
+  - 10M shipments/day, 100K vehicles, time windows, capacity, multi-modal
+  - CANNOT solve as single VRP instance (would take years to compute)
+  
+  DECOMPOSITION STRATEGY:
+  1. Geographic partitioning: divide world into 200 zones
+     - Each zone: 50K shipments, 500 vehicles → solvable VRP instance
+  2. Inter-zone consolidation: 50 major corridors, optimize separately
+  3. Hierarchical LNS (Large Neighborhood Search):
+     - Per-zone: greedy init + 5000 iterations LNS = 5 minutes each
+     - 200 zones × 5 min ÷ 50 solvers = 20 minutes total
+     - Cross-zone optimization pass: 10 minutes
+     - TOTAL: 30 minutes for full fleet optimization
+  4. Quality: within 3-5% of theoretical optimum (proven via LP relaxation bounds)
+  
 CONSOLIDATION OPTIMIZATION:
-  - 8K shipments → group compatible ones into containers
-  - Bin packing problem: weight + volume constraints
-  - Greedy + local search: O(n²) = 64M comparisons
-  - With sorting pre-optimization: O(n log n) = manageable
-  - Time: 2-5 minutes for all 8K shipments
+  - 10M shipments → group into containers/pallets/trucks
+  - Multi-dimensional bin-packing: weight × volume × compatibility × timing
+  - Greedy + local search: O(n²) per zone = 50K² = 2.5B per zone
+  - With sorted pre-optimization: O(n log n) = manageable
+  - 200 zones in parallel: 5 minutes for global consolidation
+
+RE-ROUTING ON DISRUPTION (CRITICAL PATH):
+  - Major disruption affects 100K+ shipments simultaneously (Suez, port closure)
+  - Cannot re-route all sequentially (100K × 100ms = 2.8 hours)
+  - Strategy: priority queue (SLA-critical first) + capacity-aware batch re-route
+  - Top 10K critical: individual routing (10K × 100ms ÷ 100 workers = 10 sec)
+  - Remaining 90K: group by corridor, re-route at corridor level (30 seconds)
+  - Total disruption response: <1 minute for initial recommendations
 ```
 
-### Infrastructure Requirements
+### Infrastructure Requirements (Google-Scale)
 ```
-┌────────────────────────────────────────────────────────────────────┐
-│ Component              │ Specification           │ Cost/month        │
-├────────────────────────┼─────────────────────────┼───────────────────┤
-│ Graph Database         │ Neo4j (1K nodes, 10K    │ $2K               │
-│ (route network)        │ edges, frequently read) │ (or JanusGraph    │
-│                        │                         │ on Bigtable: $1K) │
-├────────────────────────┼─────────────────────────┼───────────────────┤
-│ Time-Expanded Graph    │ In-memory (Redis or     │ $500              │
-│ (rebuilt hourly)       │ application memory)     │                   │
-│                        │ 500K edges × 100B = 50MB│                   │
-├────────────────────────┼─────────────────────────┼───────────────────┤
-│ Optimization Engine    │ 4 high-CPU instances    │ $3K               │
-│ (OR-Tools / custom)    │ 32 cores, 64GB each     │                   │
-│                        │ For VRP + consolidation │                   │
-├────────────────────────┼─────────────────────────┼───────────────────┤
-│ Rate Engine            │ Redis (carrier rates,   │ $800              │
-│ (pricing lookups)      │ 100K rate entries, TTL) │                   │
-├────────────────────────┼─────────────────────────┼───────────────────┤
-│ ML Models              │ 2 GPU instances         │ $2K               │
-│ (transit prediction,   │ (transit time, disruption│                  │
-│  disruption risk)      │  risk inference)        │                   │
-├────────────────────────┼─────────────────────────┼───────────────────┤
-│ Shipment Tracking DB   │ Bigtable or DynamoDB    │ $1.5K             │
-│ (10K active shipments) │ 500K events/day writes  │                   │
-├────────────────────────┼─────────────────────────┼───────────────────┤
-│ Event Bus (disruptions)│ Kafka (3 brokers)       │ $1.5K             │
-├────────────────────────┼─────────────────────────┼───────────────────┤
-│ API + Orchestration    │ 4 app server instances  │ $1K               │
-├────────────────────────┼─────────────────────────┼───────────────────┤
-│ TOTAL                  │                         │ ~$12K/month       │
-└────────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────────┐
+│ Component              │ Specification              │ Cost/month            │
+├────────────────────────┼────────────────────────────┼───────────────────────┤
+│ Graph Database         │ Spanner (50K nodes, 500K   │ $50K                  │
+│ (route network)        │ edges, multi-region, strong│ (global consistency   │
+│                        │ consistency for rate locks) │  for booking)         │
+├────────────────────────┼────────────────────────────┼───────────────────────┤
+│ Time-Expanded Graph    │ In-memory service (GKE)    │ $30K                  │
+│ (rebuilt every 15 min) │ 6 instances × 32GB = 192GB │ (3 regions × 2 inst) │
+│                        │ + 100M edges per instance  │                       │
+├────────────────────────┼────────────────────────────┼───────────────────────┤
+│ Optimization Engine    │ 200 high-CPU pods (GKE)    │ $200K                 │
+│ (OR-Tools + custom)    │ 64 vCPU, 128GB each        │ (burst to 500 during │
+│                        │ Batch + real-time routing   │  re-routing events)   │
+├────────────────────────┼────────────────────────────┼───────────────────────┤
+│ ML Models (prediction) │ 16 GPU instances (A100)    │ $80K                  │
+│ (transit time, risk,   │ Transit time: 4 GPUs       │                       │
+│  cost, carbon)         │ Disruption risk: 4 GPUs    │                       │
+│                        │ Cost prediction: 4 GPUs    │                       │
+│                        │ Carbon model: 4 GPUs       │                       │
+├────────────────────────┼────────────────────────────┼───────────────────────┤
+│ Rate Engine            │ Bigtable (10M rate entries  │ $40K                  │
+│ (carrier pricing)      │ TTL, real-time spot rates)  │                       │
+│                        │ + Redis hot cache (100K top)│                       │
+├────────────────────────┼────────────────────────────┼───────────────────────┤
+│ Shipment Tracking DB   │ Spanner (10M active +      │ $100K                 │
+│                        │ 100M historical, multi-rgn) │                       │
+│                        │ 50M events/day writes       │                       │
+├────────────────────────┼────────────────────────────┼───────────────────────┤
+│ Event Bus              │ Pub/Sub (from event system) │ $20K                  │
+│ (disruption signals)   │ + Kafka for internal pub-sub│                       │
+├────────────────────────┼────────────────────────────┼───────────────────────┤
+│ Map/GIS Services       │ Google Maps Platform       │ $100K                 │
+│ (distance, routing,    │ (distance matrix, traffic, │ (enterprise pricing)  │
+│  geocoding)            │  geocoding at scale)        │                       │
+├────────────────────────┼────────────────────────────┼───────────────────────┤
+│ API + Orchestration    │ 50 app server pods (GKE)   │ $25K                  │
+│                        │ + Workflow orchestration    │                       │
+├────────────────────────┼────────────────────────────┼───────────────────────┤
+│ TOTAL                  │                            │ ~$645K/month          │
+│ Per customer (2000)    │                            │ ~$325/month           │
+│ Revenue/customer       │                            │ $50K-2M/year          │
+└────────────────────────────────────────────────────────────────────────────┘
+
+UNIT ECONOMICS:
+- Platform cost: $7.7M/year
+- Revenue (2000 customers × avg $200K): $400M/year → 98% gross margin
+- WHY SO HIGH MARGIN: logistics optimization saves customers 10-30% on shipping
+  A customer spending $10M/year on shipping saves $1-3M → will pay $200K gladly
+- VALUE DELIVERED: $500B managed logistics × 5% avg improvement = $25B annual savings
+  Platform captures <2% of value created → massive pricing headroom
 ```
+
+---
 
 ---
 
@@ -7073,45 +7396,55 @@ TRADE-OFF:
 14. "Do different customers have different document formats and rules?"
 15. "How do we handle completely new document types we haven't seen before?"
 
-### Expected Answers:
-- 50K documents/day, growing to 200K
-- 60% digital PDF, 30% scanned, 10% email/EDI
-- ~500 distinct templates across all customers
-- Critical fields: amounts (99%), dates (99%), PO/invoice numbers (99.5%), line items (95%)
-- Currently: 40% manual data entry, 60% semi-automated (template matching)
-- Multi-tenant: each customer has unique document formats
-- Extracted data feeds into ERP and a matching/reconciliation engine
-- Processing time: <5 minutes per document
-- Learn from corrections within 24 hours
+### Expected Answers (Google-Scale):
+- 50 MILLION documents/day across 5,000+ enterprise customers globally
+- 40% digital PDF, 30% scanned paper, 15% email attachments, 10% EDI/XML, 5% photos
+- 500K+ distinct templates/layouts (long tail: new formats discovered daily)
+- Critical fields: amounts (99.5%), dates (99.5%), PO/invoice numbers (99.9%), line items (98%)
+- Currently: replacing a fragmented market of manual + legacy OCR solutions
+- Multi-tenant: each customer has unique formats, rules, validation logic, and ERP schemas
+- Feeds into: ERP, payment systems, compliance engines, audit trails, analytics platforms
+- Processing time: <60 seconds for 95% of documents (real-time for business workflows)
+- Learn from corrections within 1 hour (continuous online learning at scale)
+- Multi-language: 40+ languages, including CJK, Arabic (RTL), mixed-language documents
 
 ---
 
 ## PHASE 2: Requirements & Math (3 minutes)
 
 ```
-"Let me size this:
+"Let me size this at Google scale:
 
 THROUGHPUT:
-- 200K docs/day (target) = ~2.3 docs/sec sustained
-- But bursty: most arrive 8am-6pm business hours = ~5.5 docs/sec
-- Peak burst: 10x = 55 docs/sec (month-end invoice dumps)
+- 50M docs/day = ~580 docs/sec sustained
+- But bursty: business hours across global timezones = ~800 docs/sec base
+- Peak burst: 5x = 4,000 docs/sec (quarter-end, audit seasons, tax deadlines)
+- Absolute max design target: 10,000 docs/sec (headroom + growth)
 
 PROCESSING BUDGET:
-- 5 minutes per doc target
-- Actual processing time per doc: 10-60 seconds (depending on complexity)
-- Bottleneck is ML inference, not I/O
+- <60 seconds SLO for 95% of documents (p95)
+- <5 seconds for known templates with high-confidence extraction (60% of docs)
+- <30 seconds for novel layouts requiring VLM analysis (30% of docs)
+- <120 seconds for complex multi-page documents with tables (10% of docs)
+- Bottleneck: GPU inference for VLM/OCR, NOT I/O or network
 
 ACCURACY MATH:
-- 99% accuracy on amounts means: 1 error per 100 documents
-- At 200K docs/day = 2,000 errors/day needing human review
-- Human review capacity: 20 reviewers × 100 docs/day = 2,000/day ✓
-- Goal: drive auto-approval rate up (currently 60% → target 95%)
+- 99.5% accuracy on amounts = 1 error per 200 documents
+- At 50M docs/day = 250K documents flagged for review
+- BUT: auto-approval rate target is 92% → only 4M docs need human review
+- 4M reviews/day at avg 30 sec per review = 33,000 reviewer-hours/day
+- Crowd-sourced + in-house reviewers across timezones = feasible with 5,000 reviewers
+- Each reviewer: 100-150 docs/hour = 800-1200 docs/day
+- KEY INSIGHT: Every 1% improvement in auto-approval = 500K fewer reviews = 40 fewer FTEs
 
 STORAGE:
-- Avg document: 200KB (PDF) + 5KB (extracted JSON) + 1KB (metadata)
-- Daily: 200K × 200KB = 40 GB/day for originals
-- Keep originals 7 years (compliance) = ~100 TB
-- Extracted data: negligible vs originals
+- Avg document: 250KB (PDF/image) + 8KB (extracted JSON) + 2KB (metadata/audit)
+- Daily originals: 50M × 250KB = 12.5 TB/day
+- Daily extracted: 50M × 10KB = 500 GB/day
+- Keep originals 10 years (compliance): 12.5 TB × 365 × 10 = 45 PB
+- Extracted data (queryable): 500 GB × 365 × 10 = 1.8 PB
+- Training data (corrections + ground truth): ~500 TB accumulated
+- TOTAL STORAGE: ~50 PB (lifecycle-managed with cold/archive tiers)
 
 COST:
 - OCR/extraction per doc: $0.01-0.05 (depending on model)
@@ -7521,54 +7854,85 @@ but in the automated reconciliation it enables."
 
 ---
 
-## DETAILED SCALE ESTIMATES
+## DETAILED SCALE ESTIMATES (GOOGLE-SCALE)
 
 ### Processing Pipeline Throughput
 ```
-DOCUMENTS: 200K/day target
+DOCUMENTS: 50M/day target (across 5,000 enterprise customers)
 
-PROCESSING TIME BUDGET (5 min per doc max):
-  But actual processing is much faster:
-  - Preprocessing (OCR, layout): 2-5 seconds
-  - Classification: 200ms (known template) to 5s (VLM for unknown)
-  - Extraction: 1-15 seconds (depends on model tier)
-  - Validation: 200ms (rule checks)
-  - Total: 3-25 seconds per doc (NOT 5 minutes — that's the SLA)
+PROCESSING TIME BUDGET (<60 sec SLO for p95):
+  Tier 1 — Known template, high confidence (60% = 30M docs/day):
+  - Template match: 100ms
+  - Field extraction (regex + lightweight model): 500ms
+  - Validation: 200ms
+  - Total: <1 second per doc
+  
+  Tier 2 — Known layout family, needs ML extraction (30% = 15M docs/day):
+  - OCR (if scanned): 2 seconds
+  - LayoutLM/DocFormer inference: 3 seconds
+  - Field extraction + validation: 1 second
+  - Total: 3-6 seconds per doc
+  
+  Tier 3 — Novel/complex documents requiring VLM (10% = 5M docs/day):
+  - OCR + layout analysis: 3 seconds
+  - VLM inference (Gemini Pro Vision): 5-15 seconds
+  - Multi-page correlation: 5 seconds
+  - Total: 15-25 seconds per doc
 
 THROUGHPUT DESIGN:
-  200K docs/day ÷ 16 active hours = 12,500 docs/hour = 3.5 docs/sec
-  Peak (month-end): 10x = 35 docs/sec
+  50M docs/day ÷ 20 active hours (global) = 2.5M docs/hour = 694 docs/sec avg
+  Peak (quarter-end/tax season): 5x = 3,472 docs/sec
   
-  With avg processing time of 10 seconds:
-  - Need 35 × 10 = 350 concurrent processing slots at peak
-  - If workers have 4 vCPU: 350 ÷ 4 = 88 worker instances (peak)
-  - Auto-scale: 20 instances baseline, up to 100 at peak
+  Tier 1 processing (30M/day, <1s each):
+  - 30M ÷ 72,000s (20 hours) = 417 docs/sec avg
+  - Need: 417 concurrent processing slots (CPU-only, cheap)
+  - 50 GKE pods with 8 vCPU each handles this at 80% utilization
   
-  GPU for VLM/OCR:
-  - 20% of docs go to VLM path (40K/day = 2,500/hour = 0.7/sec)
-  - VLM inference: 5-15 seconds per doc
-  - Need: 0.7 × 10 = 7 concurrent VLM requests
-  - 2 GPU instances with batching handle this easily
+  Tier 2 processing (15M/day, ~5s each):
+  - 15M ÷ 72,000s = 208 docs/sec avg
+  - Concurrent: 208 × 5s = 1,040 processing slots needed
+  - Mix of CPU (OCR) + GPU (LayoutLM): 100 GPU pods (4× A100 each)
+  - Batch inference: groups of 32 docs per GPU = efficient utilization
+  
+  Tier 3 processing (5M/day, ~15s each):
+  - 5M ÷ 72,000s = 69 docs/sec avg
+  - Concurrent: 69 × 15s = 1,035 VLM inference slots
+  - With batching and 4× throughput per GPU: 260 GPU pods
+  - OR: Use Vertex AI Gemini API (serverless, pay-per-call)
+    5M × $0.03/doc = $150K/day via API vs $200K/month self-hosted
+    DECISION: Self-host for cost + latency control at this scale
 
 COST:
-┌──────────────────────────────────────────────────────────────────┐
-│ Component           │ Cost/doc  │ Daily (200K) │ Monthly         │
-├─────────────────────┼───────────┼──────────────┼─────────────────┤
-│ OCR (Google Doc AI) │ $0.01     │ $2,000       │ $60K            │
-│ Template model      │ $0.001    │ $160 (80%)   │ $5K             │
-│ LayoutLM inference  │ $0.005    │ $100 (10%)   │ $3K             │
-│ VLM (Claude/GPT-4V) │ $0.05     │ $2,000 (20%) │ $60K            │
-│ Compute (workers)   │ $0.002    │ $400         │ $12K            │
-│ Storage (S3+DB)     │ $0.0005   │ $100         │ $3K             │
-├─────────────────────┼───────────┼──────────────┼─────────────────┤
-│ TOTAL               │ ~$0.024   │ ~$4,800      │ ~$143K          │
-└──────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────────┐
+│ Component              │ Cost/doc  │ Daily (50M)  │ Monthly Cost            │
+├────────────────────────┼───────────┼──────────────┼─────────────────────────┤
+│ Tier 1 (template)      │ $0.0005   │ $15K         │ $450K                   │
+│ Tier 2 (LayoutLM)      │ $0.005    │ $75K         │ $2.25M                  │
+│ Tier 3 (VLM/Gemini)    │ $0.02     │ $100K        │ $3.0M                   │
+│ OCR (Google Doc AI)    │ $0.003    │ $67K (45%)   │ $2.0M                   │
+│ Storage (GCS + BQ)     │ $0.0002   │ $10K         │ $300K                   │
+│ Human review (4M/day)  │ $0.30     │ $1.2M        │ $36M (biggest cost!)    │
+│ Compute (GKE + GPU)    │ $0.003    │ $150K        │ $4.5M                   │
+├────────────────────────┼───────────┼──────────────┼─────────────────────────┤
+│ TOTAL                  │ ~$0.033   │ ~$1.6M/day   │ ~$48M/month             │
+│ vs manual entry only   │ $3-5/doc  │ $150-250M/day│ Would be $4.5-7.5B/mo!  │
+│ SAVINGS                │ ~99%      │              │                         │
+└────────────────────────────────────────────────────────────────────────────┘
 
-BREAK-EVEN vs MANUAL:
-  Manual data entry: $3-5 per document (offshore), $8-12 (US)
-  Our system: $0.024 per doc (automated) + $0.50 per reviewed doc
-  Auto-approval rate 95%: avg cost = 0.95×$0.024 + 0.05×$0.55 = $0.05/doc
-  Savings: 60-99x cheaper than manual entry
+CRITICAL INSIGHT: Human review is 75% of total cost!
+- Every 1% improvement in auto-approval = $360K/month savings
+- This is WHY active learning and continuous model improvement is the #1 priority
+- At 99% auto-approval (target Year 3): human cost drops to $3.6M/month
+  Total system cost: ~$15M/month → $180M/year
+  Revenue (5000 customers × avg $100K/year): $500M/year → 64% gross margin
+
+BREAK-EVEN vs ALTERNATIVES:
+  Our cost: $0.033/doc (at 92% auto-approval)
+  Manual data entry (offshore): $3-5/doc
+  Legacy OCR + manual review: $0.50-1.00/doc
+  Savings vs legacy: 15-30x cheaper
+  Savings vs manual: 100-150x cheaper
+  Customer ROI: Processes 50M docs that would cost $150M+ manually for $48M total
 ```
 
 ### Accuracy Deep Dive
@@ -7975,14 +8339,16 @@ This question has no standard answer. The interviewer is evaluating:
 8. "What's the tolerance for false positives? Alert fatigue is a real risk."
 9. "Budget for data acquisition? (Satellite feeds, premium news, financial data = expensive)"
 
-### Interviewer's Likely Answer:
-- All categories in scope (but prioritize by feasibility)
-- Platform serving many companies (multi-tenant)
-- 1-14 day prediction horizon is most actionable
-- Significant disruptions only (>$100K potential impact)
-- External data acquisition: yes, reasonable budget
-- False positive tolerance: <20% (5 false alerts per 1 real disruption)
-- Supply chain graph available per customer
+### Interviewer's Likely Answer (Google-Scale):
+- All categories in scope — build the "weather service" for global supply chains
+- Platform serving 5,000+ enterprises (Google-scale multi-tenant, cross-customer intelligence)
+- Prediction horizons: 1 hour (operational), 1-3 days (tactical), 1-4 weeks (strategic)
+- Significant disruptions: >$1M potential impact OR affecting 100+ entities
+- External data: unlimited budget — satellite, AIS, financial, news, social, government
+- False positive tolerance: <10% (enterprise customers have zero patience for noise)
+- Supply chain graph: 10B+ nodes across all customers (shared graph where entities overlap)
+- Cross-customer intelligence: if Supplier X is failing Customer A, warn Customer B too
+- Speed: detection within 5 minutes of earliest observable signal
 
 ---
 
@@ -8470,72 +8836,130 @@ If this doesn't work, the whole system concept fails."
 
 ---
 
-## DETAILED SCALE ESTIMATES
+## DETAILED SCALE ESTIMATES (GOOGLE-SCALE)
 
 ### Signal Volume Analysis
 ```
-MULTI-SOURCE SIGNAL INGESTION:
+MULTI-SOURCE SIGNAL INGESTION (Google-Scale Platform — 5000 customers):
 
-┌─────────────────────────────────────────────────────────────────────┐
-│ Source              │ Raw Volume    │ After Filter │ Useful Signals  │
-├─────────────────────┼───────────────┼──────────────┼─────────────────┤
-│ News (APIs: GDELT,  │ 100K articles │ 5K relevant  │ ~50 events/day  │
-│  Reuters, AP)       │ /day          │ to supply ch │                 │
-├─────────────────────┼───────────────┼──────────────┼─────────────────┤
-│ Weather (NOAA,      │ 50K forecasts │ 2K in supply │ ~20 severe      │
-│  ECMWF, local)      │ /day          │ chain regions│ weather/day     │
-├─────────────────────┼───────────────┼──────────────┼─────────────────┤
-│ Financial (stock,   │ 10K data pts  │ 500 supplier │ ~5 signals/day  │
-│  credit, filings)   │ /day          │ specific     │ (bankruptcies,  │
-│                     │               │              │  downgrades)     │
-├─────────────────────┼───────────────┼──────────────┼─────────────────┤
-│ Maritime (AIS ship  │ 5M position   │ 100K on our  │ ~30 congestion/ │
-│  tracking)          │ reports/day   │ routes       │  delay signals  │
-├─────────────────────┼───────────────┼──────────────┼─────────────────┤
-│ Social media        │ 500K posts    │ 1K relevant  │ ~10 signals/day │
-│ (Reddit, Twitter)   │ /day          │              │ (strikes, events)│
-├─────────────────────┼───────────────┼──────────────┼─────────────────┤
-│ TOTAL               │ ~5.7M raw     │ ~109K filtered│ ~115 signals/day│
-└─────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│ Source              │ Raw Volume       │ After Filter    │ Useful Signals        │
+├─────────────────────┼──────────────────┼─────────────────┼───────────────────────┤
+│ News (GDELT, Reuters│ 5M articles/day  │ 200K supply     │ ~2,000 events/day     │
+│  AP, 50+ languages) │ (global coverage)│ chain relevant  │ (affecting entities)  │
+├─────────────────────┼──────────────────┼─────────────────┼───────────────────────┤
+│ Weather (NOAA, ECMWF│ 500M forecast    │ 50M in supply   │ ~500 severe           │
+│  local met services)│ data points/day  │ chain zones     │ weather events/day    │
+├─────────────────────┼──────────────────┼─────────────────┼───────────────────────┤
+│ Financial (stock,   │ 100M data pts/day│ 5M supplier     │ ~100 signals/day      │
+│  credit, filings,   │ (all exchanges,  │ specific        │ (bankruptcies, rating │
+│  SEC/equivalent)    │  global)         │                 │  changes, late filings)│
+├─────────────────────┼──────────────────┼─────────────────┼───────────────────────┤
+│ Maritime AIS (global│ 500M position    │ 10M on tracked  │ ~5,000 congestion/    │
+│  vessel tracking)   │ reports/day      │ routes          │  delay signals/day    │
+├─────────────────────┼──────────────────┼─────────────────┼───────────────────────┤
+│ Satellite imagery   │ 50K images/day   │ 10K relevant    │ ~200 signals/day      │
+│ (SAR, optical, IR)  │ (Sentinel, PlaS) │ (factories,ports│ (fire, flood, closure)│
+├─────────────────────┼──────────────────┼─────────────────┼───────────────────────┤
+│ Social media (Reddit│ 50M posts/day    │ 100K relevant   │ ~500 signals/day      │
+│  Twitter, forums)   │ (supply chain    │                 │ (strikes, protests,   │
+│                     │  keywords)       │                 │  viral events)        │
+├─────────────────────┼──────────────────┼─────────────────┼───────────────────────┤
+│ Government/Regulatry│ 10K updates/day  │ 2K relevant     │ ~50 signals/day       │
+│ (sanctions, tariffs │ (all countries)  │                 │ (policy changes)      │
+│  port regulations)  │                  │                 │                       │
+├─────────────────────┼──────────────────┼─────────────────┼───────────────────────┤
+│ Customer telemetry  │ 5B events/day    │ 50M anomalous   │ ~50K early warning    │
+│ (from event system) │ (shared platform)│                 │ signals/day           │
+├─────────────────────┼──────────────────┼─────────────────┼───────────────────────┤
+│ TOTAL               │ ~6B raw/day      │ ~265M filtered  │ ~58,000 signals/day   │
+└─────────────────────────────────────────────────────────────────────────────────┘
 
-SIGNAL FUNNEL:
-  5.7M raw data points → 109K potentially relevant → 115 confirmed signals
-  → 30 mapped to customer supply chains → 10 actionable alerts/day
+SIGNAL FUNNEL (Google-Scale):
+  6B raw data points → 265M potentially relevant → 58K confirmed signals
+  → 10K mapped to specific customer supply chains → 2K scored high-risk
+  → 500 actionable predictions/day → 100 critical alerts (≥$10M impact)
   
-  REDUCTION RATIO: 570,000:1 (raw to actionable)
-  This tells us: THE HARD PROBLEM IS FILTERING, not processing volume.
+  REDUCTION RATIO: 12,000,000:1 (raw to critical actionable)
+  
+  PER CUSTOMER (5000 tenants):
+  - 58K signals ÷ relevance overlap → avg 20 signals mapped per customer per day
+  - Of which: 5 are new predictions, 15 are updates to existing tracked risks
+  - Customer alert volume: 2-5 actionable alerts/day (CRITICAL to keep low)
+
+CROSS-CUSTOMER INTELLIGENCE (Google's unique advantage):
+  - 5000 customers × avg 10K suppliers = 50M supplier relationships
+  - Many suppliers shared: avg supplier appears in 15 customer networks
+  - If Supplier X shows distress signal → alert ALL 15 customers instantly
+  - NO SINGLE CUSTOMER can build this — only a PLATFORM can aggregate
+  - This is the moat: proprietary cross-network intelligence
 
 COMPUTE REQUIREMENTS:
-  NLP Pipeline (news/social):
-  - 100K articles × classification (100ms each) = 2.8 hours on 1 machine
-  - With 4 machines: 42 minutes batch cycle (refresh every hour) ✓
-  - Entity extraction: 5K relevant × 500ms = 42 minutes (same machines)
-  - Total NLP compute: 4 machines × 16 hours = $200/day
+  NLP Pipeline (news/social — 55M docs/day):
+  - Classification: 55M × 50ms (BERT-base) = 760 GPU-hours/day
+  - Entity extraction: 200K relevant × 200ms (NER) = 11 GPU-hours/day
+  - Summarization: 200K × 500ms (Gemini Flash) = 28 GPU-hours/day
+  - Total NLP compute: 800 GPU-hours/day = 34 A100 GPUs running 24/7
+  - Cost: ~$50K/month (GPUs) + $20K/month (Gemini API for summarization)
 
-  Weather Processing:
-  - 50K forecasts × geospatial intersection with supply chain nodes
-  - Compute: trivial (geospatial query, pre-indexed)
-  - Cost: negligible
+  Satellite/Image Analysis:
+  - 50K images × 5 seconds (VLM analysis) = 70 GPU-hours/day
+  - 3 A100 GPUs dedicated + burst capacity
+  - Cost: ~$10K/month
 
-  Maritime Analysis:
-  - 5M AIS points → aggregate into port congestion metrics
-  - Rolling 24h counts per port, vessel queue length
-  - Stream processing: 1 machine handles this easily
-  - Cost: ~$100/day
+  Maritime/Geospatial:
+  - 500M AIS points → streaming aggregation (port congestion, route delays)
+  - 20 Dataflow workers (geo-indexed streaming joins)
+  - Cost: ~$15K/month
 
-  Financial Monitoring:
-  - 10K data points × lookups against customer supplier lists
-  - Anomaly detection on financial time series
-  - Cost: negligible (small data, simple models)
+  Knowledge Graph Operations:
+  - 10B-node graph (all supply chain entities globally)
+  - Impact propagation queries: BFS/DFS with 3-hop limit
+  - 10K propagation queries/day × avg 500ms = 1.4 hours compute
+  - BUT: needs fast graph traversal → Neo4j cluster or Spanner graph
+  - Graph update: 50K entity changes/day (new relationships, removed entities)
+  - Cost: ~$80K/month (Spanner graph at this scale)
 
-TOTAL INFRASTRUCTURE:
-  - NLP cluster: 4 machines × $0.10/hr = $10K/month
-  - Data feeds: news APIs ($3K), weather ($500), maritime ($2K), financial ($1K)
-  - Graph DB (Neo4j): $2K/month
-  - ML models (risk scoring): 2 GPU machines = $3K/month
-  - Storage + serving: $2K/month
-  - TOTAL: ~$24K/month
+  Risk Scoring & Prediction:
+  - 58K signals × risk scoring model (ensemble) = 500ms each = 8 GPU-hours/day
+  - Impact simulation (Monte Carlo): 2K high-risk × 1000 simulations × 100ms
+    = 55 GPU-hours for daily simulation run
+  - LLM reasoning for top 100 critical predictions: $0.10 each = $10/day (trivial)
+  - Cost: ~$20K/month
+
+TOTAL COMPUTE COST:
+┌──────────────────────────────────────────────────────────────────┐
+│ Component              │ Monthly Cost  │ % of Total              │
+├────────────────────────┼───────────────┼─────────────────────────┤
+│ NLP/Signal Processing  │ $70K          │ 18%                     │
+│ Satellite Analysis     │ $10K          │ 3%                      │
+│ Maritime/Geospatial    │ $15K          │ 4%                      │
+│ Knowledge Graph        │ $80K          │ 21%                     │
+│ Risk Scoring/Predict   │ $20K          │ 5%                      │
+│ Data Acquisition       │ $120K         │ 31% (AIS, sat, news)    │
+│ Storage (graph + events│ $50K          │ 13%                     │
+│ Infrastructure/GKE     │ $20K          │ 5%                      │
+├────────────────────────┼───────────────┼─────────────────────────┤
+│ TOTAL                  │ ~$385K/month  │                         │
+│ Per customer           │ ~$77/month    │ (extremely cheap!)      │
+│ Revenue/customer       │ $50-500K/year │                         │
+└──────────────────────────────────────────────────────────────────┘
+
+KEY INSIGHT: Disruption prediction is CHEAP to run (sub-$400K/month)
+but ENORMOUSLY VALUABLE ($50B+ in prevented losses across customers).
+The hard part is not compute — it's data acquisition and model accuracy.
+This is the ultimate high-margin Google product: low COGS, massive value.
+
+UNIT ECONOMICS:
+- Platform cost: $4.6M/year
+- Revenue (5000 × avg $100K): $500M/year
+- Gross margin: 99%+ (!!)
+- The value proposition: prevent ONE Suez-scale event for ONE customer
+  and the product pays for itself for 10 years
 ```
+
+---
+
 
 ---
 

@@ -38,13 +38,14 @@
 15. "Budget constraints on LLM API costs?"
 
 ### Interviewer's Likely Answers:
-- Multi-tenant SaaS, 50-100 enterprise customers
-- Each has 10-50 concurrent users
-- Mix of structured (ERP data) and unstructured (contracts, SOPs)
-- Daily data refresh minimum, real-time for critical metrics
-- Must cite sources, high accuracy, recommend only (no auto-actions)
-- SOC 2 required, US data residency
-- 10-15 seconds acceptable for complex queries
+- Google-scale platform: 10,000+ enterprise customers globally (think: Google Supply Chain AI as a service)
+- 500K-1M concurrent users across all tenants
+- Mix of structured (ERP data, 100B+ rows) and unstructured (10M+ documents per large customer)
+- Real-time streaming for all data, sub-minute freshness
+- Must cite sources, high accuracy, recommend AND auto-act for approved workflows
+- SOC 2, ISO 27001, FedRAMP, GDPR, data residency per region (US, EU, APAC)
+- <3 seconds for simple lookups, <8 seconds for complex analytical queries
+- Multi-region deployment (us-central1, europe-west4, asia-east1)
 
 ---
 
@@ -64,16 +65,19 @@ FUNCTIONAL REQUIREMENTS:
 5. Audit trail for compliance
 
 NON-FUNCTIONAL:
-- 100 customers × 50 users × ~5 queries/hour = ~25K queries/hour = ~7 QPS avg
-- Peak: 10x = 70 QPS  
-- Latency: <5s for simple lookups, <15s for complex analysis
-- Availability: 99.9% (44 min downtime/month)
-- Data isolation: Tenant A must NEVER see Tenant B's data
+- 10K customers × 100 active users × ~8 queries/hour = 8M queries/hour = ~2,200 QPS avg
+- Peak (Monday mornings, month-end, global overlap hours): 10x = 22,000 QPS
+- Burst: Black Friday/peak planning season: 50,000 QPS
+- Latency: p50 <2s, p95 <5s, p99 <10s (even for complex queries)
+- Availability: 99.99% (4.3 min downtime/month) — Google-grade SLO
+- Data isolation: Tenant A must NEVER see Tenant B's data (crypto-sharded)
+- Multi-region: active-active across 3+ regions for data residency
 
 COST ESTIMATE:
-- 25K queries/hour × $0.03/query (LLM) = $750/hour = $18K/day
-- With 60% cache hit rate: $7.2K/day
-- This is acceptable for enterprise SaaS ($50K+/year per customer)
+- 8M queries/hour × $0.008/query (with aggressive caching + model routing) = $64K/hour = $1.5M/day
+- With 80% semantic cache hit + model routing (70% to smaller models): $300K/day
+- At Google scale, amortized cost per customer: $30K/year → high-margin at enterprise pricing ($200K+/year)
+- Must justify: $110M/year run cost for $2B+ ARR business
 
 Does this scope feel right to you?"
 ```
@@ -476,74 +480,135 @@ regression, promote to 100% after 24h of green metrics."
 
 ---
 
-## DETAILED SCALE ESTIMATES
+## DETAILED SCALE ESTIMATES (GOOGLE-SCALE)
 
 ### Query Volume Modeling
 ```
 USERS:
-- 100 enterprise customers
-- Avg 30 active users per customer = 3,000 total users
+- 10,000 enterprise customers (Fortune 5000 + large mid-market)
+- Avg 100 active users per customer = 1,000,000 total registered users
+- ~300K DAU (30% daily active rate for enterprise tools)
 - Power users: 20% send 80% of queries
-- Avg session: 3 queries in 10 minutes, 4 sessions/day
+- Avg session: 5 queries in 15 minutes, 6 sessions/day (stickier than chat)
 
 QUERY MATH:
-- Active hours: 8am-6pm per timezone (effectively 16h with global spread)
-- Avg: 3,000 users × 12 queries/day = 36,000 queries/day = 0.6 QPS
-- Peak (Monday morning, month-end): 10x = 6 QPS
-- Burst (all users in one company run reports): 50 QPS for 5 minutes
+- Global platform: 24/7 usage across timezones (no quiet period)
+- Average: 300K DAU × 30 queries/day = 9M queries/day = ~105 QPS steady
+- Business hours amplification: 3x during global overlap (EU+US: 1-5pm UTC)
+- Peak (Monday mornings, month-end close, quarter-end): 10x = 1,050 QPS
+- Burst (Black Friday, Chinese New Year, major disruptions): 50x = 5,250 QPS
+- Absolute max design target: 10,000 QPS (headroom for growth)
 
-This is LOW QPS. The bottleneck is NOT throughput — it's:
-1. Latency per query (LLM calls are 3-15 seconds)
-2. Cost per query ($0.02-0.10 depending on complexity)
-3. Concurrent connections to LLM providers (rate limits)
+THIS IS HIGH QPS for LLM systems. The challenges are:
+1. LLM serving at 10K QPS: need massive GPU fleet or self-hosted models
+2. Cost per query at scale: $0.025/query × 9M/day = $225K/day UNOPTIMIZED
+3. Vector search at 10K QPS across 200B+ vectors
+4. Multi-tenancy isolation at speed (can't add per-query auth overhead)
+5. Global latency: need regional deployments, not single-region
+
+CRITICAL DESIGN DECISION:
+  At Google scale, you CANNOT rely solely on external LLM APIs (OpenAI, Anthropic).
+  You need:
+  - Self-hosted models (Gemini/PaLM on TPUs) for 80% of traffic (simple queries)
+  - Frontier model APIs (GPT-4/Claude) only for complex reasoning (20%)
+  - Aggressive semantic caching (80%+ hit rate for repeated patterns)
+  - Model cascade: smallest model that can handle each query type
 ```
 
 ### Storage Modeling
 ```
-PER CUSTOMER:
-- ERP data (structured): 50M rows × 200 bytes = 10 GB
-- Documents (unstructured): 10K docs × 200KB = 2 GB
-- Embeddings: 10K docs × 20 chunks × 6KB = 1.2 GB
-- Conversation history: 1K sessions × 5 turns × 2KB = 10 MB
-- Total per customer: ~14 GB
+PER CUSTOMER (Large Enterprise — top 10%):
+- ERP data (structured): 5B rows × 200 bytes = 1 TB
+- Documents (unstructured): 500K docs × 300KB = 150 GB
+- Embeddings: 500K docs × 50 chunks × 6KB = 150 GB
+- Conversation history: 100K sessions × 10 turns × 3KB = 3 GB
+- Customer knowledge graph: 50M nodes × 500B = 25 GB
+- Total per large customer: ~1.3 TB
 
-ALL CUSTOMERS:
-- 100 customers × 14 GB = 1.4 TB
-- Growth: 20%/year from new data, 30%/year from new customers
-- 3-year projection: ~5 TB
+PER CUSTOMER (Typical — median):
+- ERP data: 500M rows × 200 bytes = 100 GB
+- Documents: 50K docs × 250KB = 12.5 GB
+- Embeddings: 50K docs × 30 chunks × 6KB = 9 GB
+- Conversation history: 10K sessions × 8 turns × 3KB = 240 MB
+- Total per median customer: ~125 GB
+
+ALL CUSTOMERS (PLATFORM TOTAL):
+- Top 500 customers × 1.3 TB = 650 TB
+- Next 2,000 × 300 GB = 600 TB
+- Remaining 7,500 × 125 GB = 940 TB
+- TOTAL MANAGED DATA: ~2.2 PB
+- Growth: 40%/year (new customers + data volume growth)
+- 3-year projection: ~6 PB
 
 VECTOR DB SIZING:
-- 100 customers × 200K chunks × 1536-dim float32 = 
-  20M vectors × 6KB = 120 GB (fits in memory for fast retrieval)
-- With metadata: ~200 GB total vector storage
+- Total chunks: 10K customers × avg 1M chunks = 10B vectors
+- Storage: 10B × 1536-dim × float16 = 30 TB raw
+- With HNSW index overhead (2.5x): 75 TB
+- CANNOT fit in memory — need distributed vector DB:
+  Option A: Google Vertex AI Matching Engine (managed, scales to billions)
+  Option B: Weaviate/Milvus on GKE (50-node cluster, 1.5TB RAM each)
+  Option C: Custom ScaNN-based solution (Google's internal vector search)
+- MY CHOICE: Vertex AI Matching Engine for ease + Google Cloud Credits,
+  with per-tenant index sharding for isolation
+
+MULTI-REGION REPLICATION:
+- 3 active regions: US, EU, APAC
+- Full data replicated per region for data residency (6.6 PB total w/ 3x)
+- Vector indices: regional (queries go to nearest region)
+- Structured data: Spanner (global consistency, regional reads)
 ```
 
 ### Cost Modeling
 ```
-LLM COSTS (per query breakdown):
-┌──────────────────────────────────────────────────────────────┐
-│ Component           │ Tokens    │ Cost      │ Cacheable?     │
-├──────────────────────────────────────────────────────────────┤
-│ System prompt       │ 1,000     │ ~$0.003   │ YES (prefix)   │
-│ Retrieved context   │ 3,000     │ ~$0.009   │ Partially      │
-│ Conversation history│ 1,500     │ ~$0.005   │ YES (prefix)   │
-│ User query          │ 50        │ ~$0.000   │ NO             │
-│ Output generation   │ 500       │ ~$0.008   │ NO             │
-├──────────────────────────────────────────────────────────────┤
-│ TOTAL per query     │ ~6,000    │ ~$0.025   │               │
-│ With prefix caching │           │ ~$0.012   │ 50% savings    │
-│ With semantic cache │           │ ~$0.005   │ 80% hit rate   │
-└──────────────────────────────────────────────────────────────┘
+LLM COSTS AT GOOGLE SCALE:
+┌──────────────────────────────────────────────────────────────────────────┐
+│ Component              │ Volume      │ Unit Cost │ Daily Cost │ Strategy │
+├──────────────────────────────────────────────────────────────────────────┤
+│ Self-hosted Gemini     │ 5.4M q/day  │ $0.003    │ $16K       │ 60% of  │
+│ (TPU pods, simple)     │ (60%)       │           │            │ queries  │
+├──────────────────────────────────────────────────────────────────────────┤
+│ Self-hosted Gemini Pro │ 1.8M q/day  │ $0.008    │ $14K       │ 20%     │
+│ (TPU pods, medium)     │ (20%)       │           │            │ complex  │
+├──────────────────────────────────────────────────────────────────────────┤
+│ Frontier API (Claude/  │ 900K q/day  │ $0.025    │ $22K       │ 10%     │
+│ GPT-4, hardest queries)│ (10%)       │           │            │ hardest  │
+├──────────────────────────────────────────────────────────────────────────┤
+│ Semantic cache hit     │ 900K q/day  │ $0.0005   │ $450       │ 10%     │
+│ (no LLM call needed)   │ (10%)       │           │            │ repeated │
+├──────────────────────────────────────────────────────────────────────────┤
+│ TOTAL LLM              │ 9M q/day    │ $0.006avg │ $52K/day   │          │
+│ MONTHLY LLM            │ 270M q/mo   │           │ $1.6M/mo   │          │
+└──────────────────────────────────────────────────────────────────────────┘
 
-MONTHLY COST (steady state):
-- 36K queries/day × 30 days × $0.012 (with caching) = $13K/month (LLM)
-- Infrastructure (compute, vector DB, storage): ~$8K/month
-- Total: ~$21K/month
-- Revenue per customer: $50K+/year → healthy margin
+INFRASTRUCTURE COSTS:
+┌────────────────────────────────────────────────────────────────────────┐
+│ Component                   │ Spec                    │ Monthly Cost   │
+├─────────────────────────────┼─────────────────────────┼────────────────┤
+│ TPU pods (self-hosted LLMs) │ 16× v5e pods (256 chips)│ $800K          │
+│ Vector DB (Vertex Matching) │ 75 TB, 3 regions        │ $200K          │
+│ Spanner (structured data)   │ 2 PB, multi-region      │ $400K          │
+│ GCS (document storage)      │ 3 PB (w/ replication)   │ $60K           │
+│ Redis (caching layer)       │ 500 nodes, 50TB total   │ $150K          │
+│ GKE (app/orchestration)     │ 200 nodes, 3 regions    │ $100K          │
+│ Networking (cross-region)   │ ~50 TB/month egress     │ $100K          │
+│ Monitoring/observability    │ Cloud Ops at scale      │ $50K           │
+├─────────────────────────────┼─────────────────────────┼────────────────┤
+│ TOTAL INFRASTRUCTURE        │                         │ ~$1.86M/month  │
+│ + LLM COSTS                 │                         │ ~$1.6M/month   │
+│ GRAND TOTAL                 │                         │ ~$3.5M/month   │
+└────────────────────────────────────────────────────────────────────────┘
 
-SCALING CONCERN:
-- At 500 customers: $65K/month LLM + $30K infra = $95K/month
-- Need: aggressive caching, model routing (cheap model for simple queries)
+UNIT ECONOMICS:
+- Cost per customer: $3.5M ÷ 10K = $350/month avg
+- Revenue per customer: $15K-200K/year (tiered pricing)
+- Blended margin: 70-85% at scale (Google infrastructure advantage)
+- Break-even at: ~2,000 customers
+
+SCALING ECONOMICS (why this works at Google):
+- Self-hosted LLMs on TPUs are 5-10x cheaper than API calls at scale
+- Spanner/Bigtable pricing is internal (much cheaper than external cloud)
+- Shared infrastructure amortized across Google Cloud customers
+- Semantic caching improves with scale (more users → more cache hits)
 ```
 
 ---
@@ -647,21 +712,34 @@ CONS:
 WHEN TO CHOOSE: Mature product, complex use cases, accuracy > latency.
 ```
 
-### My Recommendation & Why:
+### My Recommendation & Why (At Google Scale):
 ```
-START with Approach B (Pipeline Router) because:
-1. Matches the 100-customer scale (need reliability, not just capability)
-2. Cost-optimizable (critical at $21K/month LLM costs)
-3. Debuggable (enterprise customers demand explainability)
-4. Team-scalable (each pipeline can be owned independently)
+CHOOSE Approach B (Pipeline Router) as the backbone because:
+1. At 10K QPS, you NEED independent pipeline scaling (analytics traffic 
+   bursts independently from RAG traffic)
+2. Cost control is existential at $3.5M/month — model routing saves 60%+
+3. At 10K customers, pipeline failures must be isolated (one bad pipeline 
+   can't take down the platform)
+4. 50+ engineer team can own pipelines independently (org-scalable)
+5. Each pipeline gets its own SLO, capacity planning, and on-call rotation
 
-EVOLVE toward Approach C for complex queries by:
-- Adding an "agent" pipeline alongside RAG/Analytics/Recommendation
-- Route only complex diagnostic queries to the agent pipeline
-- Keep simple queries on fast pipelines (80% of traffic)
+LAYER Approach C (Agent) for complex queries (10-15% of traffic):
+- Router identifies multi-step/diagnostic queries and routes to Agent tier
+- Agent tier runs on frontier models (more expensive, higher capability)
+- Agent queries have relaxed latency SLO (8s vs 2s for simple)
+- Agent tier auto-scales independently (bursty, GPU-hungry)
 
-This gives the best of both worlds: fast/cheap for simple queries,
-capable/expensive for complex queries.
+WHY NOT Approach A (Monolithic LLM-First) at this scale:
+- Single LLM call per query means EVERY query hits expensive model
+- At 9M queries/day, cost difference between model tiers = $100K+/day
+- No circuit breaker isolation: one bad prompt crashes everything
+- Can't independently scale query types (analytics vs docs vs recommendations)
+
+GOOGLE-SPECIFIC ADVANTAGES:
+- Self-hosted Gemini on TPUs for the simple query pipelines (5-10x cheaper)
+- Vertex AI pipeline orchestration for production deployment
+- Spanner for multi-region strong consistency (no eventual consistency bugs)
+- Internal bandwidth between services is free (co-located in Google DCs)
 ```
 
 ---
@@ -877,94 +955,145 @@ Example:
 └──────────────────┴───────────────────┴────────────────────────┴──────────────────────┘
 ```
 
-### Latency Budget Breakdown
+### Latency Budget Breakdown (Google-Scale Targets)
 ```
-TOTAL BUDGET: 10 seconds (simple), 15 seconds (complex)
+TOTAL BUDGET: p50 <2s (simple), p50 <5s (complex), p99 <8s (all)
+SLO: 99.9% of queries complete within 10 seconds
 
 Simple Query "What's our inventory of SKU-789?":
 ┌──────────────────────────────┬──────────┬──────────┐
 │ Step                         │ Time     │ Cumulative│
 ├──────────────────────────────┼──────────┼──────────┤
-│ API Gateway + Auth           │ 20ms     │ 20ms     │
-│ Query Classification         │ 50ms     │ 70ms     │
-│ Vector Search (retrieval)    │ 80ms     │ 150ms    │
-│ Reranking                    │ 100ms    │ 250ms    │
-│ Context Assembly             │ 30ms     │ 280ms    │
-│ LLM Generation (Haiku)       │ 1,500ms  │ 1,780ms  │
-│ Citation Verification        │ 200ms    │ 1,980ms  │
-│ Response Formatting          │ 20ms     │ 2,000ms  │
+│ Global LB + Edge routing     │ 5ms      │ 5ms      │
+│ Auth + Tenant resolution     │ 10ms     │ 15ms     │
+│ Semantic cache check         │ 15ms     │ 30ms     │
+│ Query Classification (local) │ 20ms     │ 50ms     │
+│ Vector Search (regional)     │ 40ms     │ 90ms     │
+│ Reranking (GPU, batched)     │ 50ms     │ 140ms    │
+│ Context Assembly             │ 10ms     │ 150ms    │
+│ LLM Generation (Gemini Nano) │ 800ms    │ 950ms    │
+│ Citation + Guard Check       │ 100ms    │ 1,050ms  │
+│ Response Formatting          │ 10ms     │ 1,060ms  │
 ├──────────────────────────────┼──────────┼──────────┤
-│ TOTAL                        │          │ ~2 sec   │
+│ TOTAL                        │          │ ~1.1 sec │
+│ (With streaming TTFB)        │          │ ~400ms   │
 └──────────────────────────────┴──────────┴──────────┘
 
-Complex Query "Why did we stockout last week?":
+Complex Query "Why did we stockout last week across all East Coast DCs?":
 ┌──────────────────────────────┬──────────┬──────────┐
 │ Step                         │ Time     │ Cumulative│
 ├──────────────────────────────┼──────────┼──────────┤
-│ API Gateway + Auth           │ 20ms     │ 20ms     │
-│ Query Classification         │ 50ms     │ 70ms     │
-│ PARALLEL:                    │          │          │
-│   Vector Search + Rerank     │ 180ms    │          │
-│   SQL Generation + Execution │ 3,000ms  │ 3,070ms  │
-│ Context Assembly             │ 50ms     │ 3,120ms  │
-│ LLM Synthesis (Opus)         │ 8,000ms  │ 11,120ms │
-│ Citation Verification        │ 500ms    │ 11,620ms │
-│ Response Formatting          │ 30ms     │ 11,650ms │
+│ Global LB + Edge routing     │ 5ms      │ 5ms      │
+│ Auth + Tenant resolution     │ 10ms     │ 15ms     │
+│ Query Classification         │ 20ms     │ 35ms     │
+│ Query Planning (Gemini Pro)  │ 500ms    │ 535ms    │
+│ PARALLEL EXECUTION:          │          │          │
+│   Vector Search + Rerank     │ 90ms     │          │
+│   SQL Gen + Spanner Query    │ 1,500ms  │          │
+│   Knowledge Graph traversal  │ 200ms    │ 1,735ms  │
+│ Context Assembly + Fusion    │ 30ms     │ 1,765ms  │
+│ LLM Synthesis (Gemini Ultra) │ 3,000ms  │ 4,765ms  │
+│ Citation + Safety Check      │ 200ms    │ 4,965ms  │
+│ Response Formatting          │ 15ms     │ 4,980ms  │
 ├──────────────────────────────┼──────────┼──────────┤
-│ TOTAL                        │          │ ~12 sec  │
+│ TOTAL                        │          │ ~5 sec   │
+│ (With streaming TTFB)        │          │ ~2 sec   │
 └──────────────────────────────┴──────────┴──────────┘
 
-OPTIMIZATION LEVERS:
-- Streaming: Send first tokens to user while still generating (perceived latency drops 60%)
-- Prefetching: While user is typing, pre-classify and pre-retrieve
-- Caching: Repeated queries hit cache in <100ms
-- Parallel: Run retrieval + SQL simultaneously (saves 3s on complex queries)
+Agent Query "Diagnose the root cause of our 15% cost increase this quarter":
+┌──────────────────────────────┬──────────┬──────────┐
+│ Step                         │ Time     │ Cumulative│
+├──────────────────────────────┼──────────┼──────────┤
+│ Auth + Classification        │ 35ms     │ 35ms     │
+│ Agent Planning (Gemini Ultra)│ 1,000ms  │ 1,035ms  │
+│ Sub-task 1: Cost breakdown   │ 2,000ms  │ 3,035ms  │
+│ Sub-task 2: Supplier changes │ 1,500ms  │ (parallel)│
+│ Sub-task 3: Volume analysis  │ 1,800ms  │ 3,035ms  │
+│ Synthesis + Recommendation   │ 2,500ms  │ 5,535ms  │
+│ Verification + Citations     │ 500ms    │ 6,035ms  │
+├──────────────────────────────┼──────────┼──────────┤
+│ TOTAL                        │          │ ~6 sec   │
+│ (With streaming TTFB)        │          │ ~2.5 sec │
+└──────────────────────────────┴──────────┴──────────┘
+
+KEY LATENCY OPTIMIZATIONS AT GOOGLE SCALE:
+- Streaming everywhere: First token in <500ms even for complex queries
+- Speculative execution: Start top-2 likely pipelines in parallel, cancel loser
+- Edge caching: Popular queries cached at CDN edge (CloudFlare/Cloud CDN)
+- Prefetching: Predict next query based on session context, pre-warm results
+- Connection pooling: Persistent gRPC streams to LLM serving (no cold start)
+- Regional locality: All data for a tenant co-located in one region
+- Batched inference: GPU batching for vector search + reranking (higher throughput)
+- KV-cache sharing: Multiple queries from same tenant share KV-cache prefix
 ```
 
 ---
 
 ## CAPACITY PLANNING
 
-### Horizontal Scaling Triggers
+### Horizontal Scaling Triggers (Google-Scale)
 ```
 SCALE SIGNAL → ACTION:
 
-Queries > 10 QPS sustained (5 min) →
-  Scale up orchestration service pods (K8s HPA)
+QPS > 5,000 sustained (1 min) →
+  Auto-scale LLM serving pods (GKE HPA + custom metrics)
+  Activate overflow to secondary TPU pod slices
   
-LLM latency p99 > 20s →
-  Activate secondary LLM provider
-  Enable request coalescing for similar queries
+LLM latency p99 > 8s →
+  Shed load: route overflow to cheaper/faster model tier
+  Enable request coalescing for semantically similar concurrent queries
+  Activate additional TPU pod slice in same region
 
-Vector DB latency p95 > 200ms →
-  Add read replica
-  Increase cache size for hot queries
+Vector DB latency p95 > 150ms →
+  Add shard replicas (Vertex Matching Engine auto-handles this)
+  Warm up cold tenant indices into memory
+  Consider index compaction if fragmented
 
-Ingestion lag > 4 hours →
-  Scale up CDC workers
-  Alert data team (potential source system issue)
+Cross-region latency p50 > 50ms →
+  Check inter-region replication lag
+  Consider promoting read replica to primary for affected region
 
-Cost per query > $0.05 avg (7-day rolling) →
-  Investigate: classifier pushing too many queries to expensive model?
-  Tune confidence thresholds for model routing
+Ingestion lag > 15 minutes →
+  Scale up Dataflow/CDC workers (auto-scaling with backlog-based metric)
+  Alert data platform team
+  Temporarily relax freshness SLO and notify affected tenants
 
-Human review queue > 500 items →
-  Investigate: accuracy degradation?
-  Retrain classifier / update retrieval index
+Cost per query > $0.012 avg (24h rolling) →
+  Investigate model routing distribution (target: 60% small, 20% medium, 10% large)
+  Check semantic cache hit rate (target: >75%)
+  Audit for query amplification (agent loops, retry storms)
+
+Global error rate > 0.1% (5 min window) →
+  Activate circuit breaker for degraded pipeline
+  Route traffic to healthy pipelines only
+  Page on-call SRE
 ```
 
-### Capacity Planning Table
+### Capacity Planning Table (Google-Scale Growth)
 ```
-┌──────────────┬──────────────┬──────────────┬──────────────┬──────────────┐
-│              │ 50 customers │ 200 customers│ 500 customers│ 1000 customers│
-├──────────────┼──────────────┼──────────────┼──────────────┼──────────────┤
-│ QPS (avg)    │ 0.3          │ 1.2          │ 3            │ 6            │
-│ QPS (peak)   │ 3            │ 12           │ 30           │ 60           │
-│ Vector DB    │ 120 GB       │ 500 GB       │ 1.2 TB       │ 2.5 TB       │
-│ LLM cost/mo  │ $7K          │ $28K         │ $65K         │ $130K        │
-│ Infra cost/mo│ $4K          │ $15K         │ $35K         │ $70K         │
-│ Engineers    │ 3-4          │ 6-8          │ 10-15        │ 20+          │
-│ Architecture │ Single-region│ Single-region│ Multi-region │ Multi-region │
-│              │ monolith     │ microservices│ microservices│ platform     │
-└──────────────┴──────────────┴──────────────┴──────────────┴──────────────┘
+┌──────────────┬──────────────┬──────────────┬──────────────┬──────────────────┐
+│              │ 1K customers │ 5K customers │ 10K customers│ 50K customers    │
+├──────────────┼──────────────┼──────────────┼──────────────┼──────────────────┤
+│ QPS (avg)    │ 100          │ 550          │ 1,100        │ 5,500            │
+│ QPS (peak)   │ 1,000        │ 5,500        │ 11,000       │ 55,000           │
+│ QPS (burst)  │ 5,000        │ 25,000       │ 50,000       │ 250,000          │
+│ Vector store │ 7.5 TB       │ 37 TB        │ 75 TB        │ 375 TB           │
+│ Spanner data │ 200 TB       │ 1 PB         │ 2 PB         │ 10 PB            │
+│ LLM cost/mo  │ $160K        │ $800K        │ $1.6M        │ $8M              │
+│ Infra cost/mo│ $200K        │ $900K        │ $1.9M        │ $9M              │
+│ Total cost/mo│ $360K        │ $1.7M        │ $3.5M        │ $17M             │
+│ TPU pods     │ 4            │ 8            │ 16           │ 64               │
+│ Engineers    │ 20           │ 50           │ 80           │ 200+             │
+│ Regions      │ 2            │ 3            │ 3            │ 5+               │
+│ Architecture │ Multi-region │ Multi-region │ Multi-region │ Federated global │
+│              │ microservices│ platform     │ platform     │ mesh             │
+│ Key concern  │ Cost optim.  │ Multi-tenancy│ Org scaling  │ Federated govern.│
+│              │              │ isolation    │              │                  │
+└──────────────┴──────────────┴──────────────┴──────────────┴──────────────────┘
+
+CRITICAL SCALING INFLECTION POINTS:
+- 1K→5K: Must move to self-hosted models (API cost becomes prohibitive)
+- 5K→10K: Must solve noisy neighbor problem (large tenants impact small ones)
+- 10K→50K: Must federate — no single team can own the whole system
+  Need platform team + pipeline teams + per-region ops teams
 ```

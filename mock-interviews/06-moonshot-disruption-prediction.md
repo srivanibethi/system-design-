@@ -54,14 +54,16 @@ This question has no standard answer. The interviewer is evaluating:
 8. "What's the tolerance for false positives? Alert fatigue is a real risk."
 9. "Budget for data acquisition? (Satellite feeds, premium news, financial data = expensive)"
 
-### Interviewer's Likely Answer:
-- All categories in scope (but prioritize by feasibility)
-- Platform serving many companies (multi-tenant)
-- 1-14 day prediction horizon is most actionable
-- Significant disruptions only (>$100K potential impact)
-- External data acquisition: yes, reasonable budget
-- False positive tolerance: <20% (5 false alerts per 1 real disruption)
-- Supply chain graph available per customer
+### Interviewer's Likely Answer (Google-Scale):
+- All categories in scope — build the "weather service" for global supply chains
+- Platform serving 5,000+ enterprises (Google-scale multi-tenant, cross-customer intelligence)
+- Prediction horizons: 1 hour (operational), 1-3 days (tactical), 1-4 weeks (strategic)
+- Significant disruptions: >$1M potential impact OR affecting 100+ entities
+- External data: unlimited budget — satellite, AIS, financial, news, social, government
+- False positive tolerance: <10% (enterprise customers have zero patience for noise)
+- Supply chain graph: 10B+ nodes across all customers (shared graph where entities overlap)
+- Cross-customer intelligence: if Supplier X is failing Customer A, warn Customer B too
+- Speed: detection within 5 minutes of earliest observable signal
 
 ---
 
@@ -549,72 +551,130 @@ If this doesn't work, the whole system concept fails."
 
 ---
 
-## DETAILED SCALE ESTIMATES
+## DETAILED SCALE ESTIMATES (GOOGLE-SCALE)
 
 ### Signal Volume Analysis
 ```
-MULTI-SOURCE SIGNAL INGESTION:
+MULTI-SOURCE SIGNAL INGESTION (Google-Scale Platform — 5000 customers):
 
-┌─────────────────────────────────────────────────────────────────────┐
-│ Source              │ Raw Volume    │ After Filter │ Useful Signals  │
-├─────────────────────┼───────────────┼──────────────┼─────────────────┤
-│ News (APIs: GDELT,  │ 100K articles │ 5K relevant  │ ~50 events/day  │
-│  Reuters, AP)       │ /day          │ to supply ch │                 │
-├─────────────────────┼───────────────┼──────────────┼─────────────────┤
-│ Weather (NOAA,      │ 50K forecasts │ 2K in supply │ ~20 severe      │
-│  ECMWF, local)      │ /day          │ chain regions│ weather/day     │
-├─────────────────────┼───────────────┼──────────────┼─────────────────┤
-│ Financial (stock,   │ 10K data pts  │ 500 supplier │ ~5 signals/day  │
-│  credit, filings)   │ /day          │ specific     │ (bankruptcies,  │
-│                     │               │              │  downgrades)     │
-├─────────────────────┼───────────────┼──────────────┼─────────────────┤
-│ Maritime (AIS ship  │ 5M position   │ 100K on our  │ ~30 congestion/ │
-│  tracking)          │ reports/day   │ routes       │  delay signals  │
-├─────────────────────┼───────────────┼──────────────┼─────────────────┤
-│ Social media        │ 500K posts    │ 1K relevant  │ ~10 signals/day │
-│ (Reddit, Twitter)   │ /day          │              │ (strikes, events)│
-├─────────────────────┼───────────────┼──────────────┼─────────────────┤
-│ TOTAL               │ ~5.7M raw     │ ~109K filtered│ ~115 signals/day│
-└─────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│ Source              │ Raw Volume       │ After Filter    │ Useful Signals        │
+├─────────────────────┼──────────────────┼─────────────────┼───────────────────────┤
+│ News (GDELT, Reuters│ 5M articles/day  │ 200K supply     │ ~2,000 events/day     │
+│  AP, 50+ languages) │ (global coverage)│ chain relevant  │ (affecting entities)  │
+├─────────────────────┼──────────────────┼─────────────────┼───────────────────────┤
+│ Weather (NOAA, ECMWF│ 500M forecast    │ 50M in supply   │ ~500 severe           │
+│  local met services)│ data points/day  │ chain zones     │ weather events/day    │
+├─────────────────────┼──────────────────┼─────────────────┼───────────────────────┤
+│ Financial (stock,   │ 100M data pts/day│ 5M supplier     │ ~100 signals/day      │
+│  credit, filings,   │ (all exchanges,  │ specific        │ (bankruptcies, rating │
+│  SEC/equivalent)    │  global)         │                 │  changes, late filings)│
+├─────────────────────┼──────────────────┼─────────────────┼───────────────────────┤
+│ Maritime AIS (global│ 500M position    │ 10M on tracked  │ ~5,000 congestion/    │
+│  vessel tracking)   │ reports/day      │ routes          │  delay signals/day    │
+├─────────────────────┼──────────────────┼─────────────────┼───────────────────────┤
+│ Satellite imagery   │ 50K images/day   │ 10K relevant    │ ~200 signals/day      │
+│ (SAR, optical, IR)  │ (Sentinel, PlaS) │ (factories,ports│ (fire, flood, closure)│
+├─────────────────────┼──────────────────┼─────────────────┼───────────────────────┤
+│ Social media (Reddit│ 50M posts/day    │ 100K relevant   │ ~500 signals/day      │
+│  Twitter, forums)   │ (supply chain    │                 │ (strikes, protests,   │
+│                     │  keywords)       │                 │  viral events)        │
+├─────────────────────┼──────────────────┼─────────────────┼───────────────────────┤
+│ Government/Regulatry│ 10K updates/day  │ 2K relevant     │ ~50 signals/day       │
+│ (sanctions, tariffs │ (all countries)  │                 │ (policy changes)      │
+│  port regulations)  │                  │                 │                       │
+├─────────────────────┼──────────────────┼─────────────────┼───────────────────────┤
+│ Customer telemetry  │ 5B events/day    │ 50M anomalous   │ ~50K early warning    │
+│ (from event system) │ (shared platform)│                 │ signals/day           │
+├─────────────────────┼──────────────────┼─────────────────┼───────────────────────┤
+│ TOTAL               │ ~6B raw/day      │ ~265M filtered  │ ~58,000 signals/day   │
+└─────────────────────────────────────────────────────────────────────────────────┘
 
-SIGNAL FUNNEL:
-  5.7M raw data points → 109K potentially relevant → 115 confirmed signals
-  → 30 mapped to customer supply chains → 10 actionable alerts/day
+SIGNAL FUNNEL (Google-Scale):
+  6B raw data points → 265M potentially relevant → 58K confirmed signals
+  → 10K mapped to specific customer supply chains → 2K scored high-risk
+  → 500 actionable predictions/day → 100 critical alerts (≥$10M impact)
   
-  REDUCTION RATIO: 570,000:1 (raw to actionable)
-  This tells us: THE HARD PROBLEM IS FILTERING, not processing volume.
+  REDUCTION RATIO: 12,000,000:1 (raw to critical actionable)
+  
+  PER CUSTOMER (5000 tenants):
+  - 58K signals ÷ relevance overlap → avg 20 signals mapped per customer per day
+  - Of which: 5 are new predictions, 15 are updates to existing tracked risks
+  - Customer alert volume: 2-5 actionable alerts/day (CRITICAL to keep low)
+
+CROSS-CUSTOMER INTELLIGENCE (Google's unique advantage):
+  - 5000 customers × avg 10K suppliers = 50M supplier relationships
+  - Many suppliers shared: avg supplier appears in 15 customer networks
+  - If Supplier X shows distress signal → alert ALL 15 customers instantly
+  - NO SINGLE CUSTOMER can build this — only a PLATFORM can aggregate
+  - This is the moat: proprietary cross-network intelligence
 
 COMPUTE REQUIREMENTS:
-  NLP Pipeline (news/social):
-  - 100K articles × classification (100ms each) = 2.8 hours on 1 machine
-  - With 4 machines: 42 minutes batch cycle (refresh every hour) ✓
-  - Entity extraction: 5K relevant × 500ms = 42 minutes (same machines)
-  - Total NLP compute: 4 machines × 16 hours = $200/day
+  NLP Pipeline (news/social — 55M docs/day):
+  - Classification: 55M × 50ms (BERT-base) = 760 GPU-hours/day
+  - Entity extraction: 200K relevant × 200ms (NER) = 11 GPU-hours/day
+  - Summarization: 200K × 500ms (Gemini Flash) = 28 GPU-hours/day
+  - Total NLP compute: 800 GPU-hours/day = 34 A100 GPUs running 24/7
+  - Cost: ~$50K/month (GPUs) + $20K/month (Gemini API for summarization)
 
-  Weather Processing:
-  - 50K forecasts × geospatial intersection with supply chain nodes
-  - Compute: trivial (geospatial query, pre-indexed)
-  - Cost: negligible
+  Satellite/Image Analysis:
+  - 50K images × 5 seconds (VLM analysis) = 70 GPU-hours/day
+  - 3 A100 GPUs dedicated + burst capacity
+  - Cost: ~$10K/month
 
-  Maritime Analysis:
-  - 5M AIS points → aggregate into port congestion metrics
-  - Rolling 24h counts per port, vessel queue length
-  - Stream processing: 1 machine handles this easily
-  - Cost: ~$100/day
+  Maritime/Geospatial:
+  - 500M AIS points → streaming aggregation (port congestion, route delays)
+  - 20 Dataflow workers (geo-indexed streaming joins)
+  - Cost: ~$15K/month
 
-  Financial Monitoring:
-  - 10K data points × lookups against customer supplier lists
-  - Anomaly detection on financial time series
-  - Cost: negligible (small data, simple models)
+  Knowledge Graph Operations:
+  - 10B-node graph (all supply chain entities globally)
+  - Impact propagation queries: BFS/DFS with 3-hop limit
+  - 10K propagation queries/day × avg 500ms = 1.4 hours compute
+  - BUT: needs fast graph traversal → Neo4j cluster or Spanner graph
+  - Graph update: 50K entity changes/day (new relationships, removed entities)
+  - Cost: ~$80K/month (Spanner graph at this scale)
 
-TOTAL INFRASTRUCTURE:
-  - NLP cluster: 4 machines × $0.10/hr = $10K/month
-  - Data feeds: news APIs ($3K), weather ($500), maritime ($2K), financial ($1K)
-  - Graph DB (Neo4j): $2K/month
-  - ML models (risk scoring): 2 GPU machines = $3K/month
-  - Storage + serving: $2K/month
-  - TOTAL: ~$24K/month
+  Risk Scoring & Prediction:
+  - 58K signals × risk scoring model (ensemble) = 500ms each = 8 GPU-hours/day
+  - Impact simulation (Monte Carlo): 2K high-risk × 1000 simulations × 100ms
+    = 55 GPU-hours for daily simulation run
+  - LLM reasoning for top 100 critical predictions: $0.10 each = $10/day (trivial)
+  - Cost: ~$20K/month
+
+TOTAL COMPUTE COST:
+┌──────────────────────────────────────────────────────────────────┐
+│ Component              │ Monthly Cost  │ % of Total              │
+├────────────────────────┼───────────────┼─────────────────────────┤
+│ NLP/Signal Processing  │ $70K          │ 18%                     │
+│ Satellite Analysis     │ $10K          │ 3%                      │
+│ Maritime/Geospatial    │ $15K          │ 4%                      │
+│ Knowledge Graph        │ $80K          │ 21%                     │
+│ Risk Scoring/Predict   │ $20K          │ 5%                      │
+│ Data Acquisition       │ $120K         │ 31% (AIS, sat, news)    │
+│ Storage (graph + events│ $50K          │ 13%                     │
+│ Infrastructure/GKE     │ $20K          │ 5%                      │
+├────────────────────────┼───────────────┼─────────────────────────┤
+│ TOTAL                  │ ~$385K/month  │                         │
+│ Per customer           │ ~$77/month    │ (extremely cheap!)      │
+│ Revenue/customer       │ $50-500K/year │                         │
+└──────────────────────────────────────────────────────────────────┘
+
+KEY INSIGHT: Disruption prediction is CHEAP to run (sub-$400K/month)
+but ENORMOUSLY VALUABLE ($50B+ in prevented losses across customers).
+The hard part is not compute — it's data acquisition and model accuracy.
+This is the ultimate high-margin Google product: low COGS, massive value.
+
+UNIT ECONOMICS:
+- Platform cost: $4.6M/year
+- Revenue (5000 × avg $100K): $500M/year
+- Gross margin: 99%+ (!!)
+- The value proposition: prevent ONE Suez-scale event for ONE customer
+  and the product pays for itself for 10 years
 ```
+
+---
+
 
 ---
 

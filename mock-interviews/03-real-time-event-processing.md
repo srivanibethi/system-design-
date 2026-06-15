@@ -37,43 +37,56 @@
 14. "GCP/AWS/on-prem?"
 15. "Existing infrastructure we should integrate with?"
 
-### Expected Answers:
-- Single large enterprise initially, expanding to multi-tenant later
-- 5M events/day currently, growing to 50M within 18 months
-- Mix of sources: APIs, webhooks, batch files, IoT sensors
-- Detection within 5 minutes acceptable
-- Initial actions: alert only. Phase 2: auto-actions for low-risk decisions
-- GCP environment
-- Some events arrive out of order (shipment updates can be delayed)
+### Expected Answers (Google-Scale):
+- Google-scale multi-tenant platform: 1,000+ enterprise supply chains monitored simultaneously
+- 5 BILLION events/day currently (across all tenants), growing to 50B within 18 months
+- Mix of sources: APIs, webhooks, CDC streams, IoT sensors (100M+ devices), satellite feeds
+- Detection within 30 seconds for critical anomalies, 5 minutes for standard
+- Auto-actions from day one for well-understood patterns (reroute, reorder, alert)
+- GCP-native, multi-region (us, eu, asia), leveraging Pub/Sub + Dataflow at extreme scale
+- Massive out-of-order: IoT can be hours late, carrier feeds batchy, global timezone skew
 
 ---
 
 ## PHASE 2: Requirements Summary & Math (3 minutes)
 
 ```
-"Let me quantify this:
+"Let me quantify this at Google scale:
 
 SCALE:
-- Current: 5M events/day = ~58 events/sec avg, ~300/sec peak
-- Target (18 mo): 50M events/day = 580 events/sec avg, 3000/sec peak
-- This is well within Kafka's capacity (millions/sec)
+- Current: 5B events/day = ~58,000 events/sec avg
+- Peak (Black Friday, Chinese NY, disruptions): 10x = 580,000 events/sec
+- Burst (major global event — Suez canal, pandemic): 20x = 1.16M events/sec
+- Target (18 mo): 50B events/day = 580K events/sec avg, 5.8M/sec peak
+- This requires: Pub/Sub (unlimited) + Dataflow (auto-scaling) — Kafka alone won't work
 
 EVENT SIZE:
-- Avg event: 500 bytes (JSON with metadata)
-- Daily storage: 50M × 500B = 25 GB/day = 9 TB/year
-- Retention: 90 days hot + archive
+- Avg event: 600 bytes (Protobuf with metadata, enrichment fields)
+- Daily ingestion: 5B × 600B = 3 TB/day = 1.1 PB/year
+- At 50B/day target: 30 TB/day = 11 PB/year
+- Retention: 30 days hot (Bigtable), 1 year warm (BigQuery), 7 years cold (GCS)
 
 ANOMALY DETECTION:
-- 50M events/day, assume 0.1% are anomalous = 50K potential anomalies
-- With 95% precision target: 2,500 false positives/day ≈ 100/hour
-- That's still too many for humans → need intelligent grouping and severity
+- 5B events/day, 0.1% anomalous = 5M potential anomalies/day
+- After correlation + dedup: 500K unique anomaly patterns/day
+- After severity filtering: 50K actionable alerts/day
+- Per customer (1000 tenants): ~50 alerts/day avg (manageable)
+- With 95% precision: 2,500 false positives/day across platform = 2.5/customer
 
-LATENCY BUDGET:
-- Event ingestion: <1 sec
-- Processing + enrichment: <1 min
-- Anomaly detection: <3 min
-- Alert delivery: <1 min
-- Total: <5 min end-to-end ✓
+ENTITY SCALE:
+- 1000 tenants × avg 500K entities each = 500M entities tracked globally
+- State per entity: running statistics, baselines, thresholds = 500 bytes
+- Total stateful computation: 500M × 500B = 250 GB of streaming state
+- This is LARGE for streaming — needs distributed state (Bigtable-backed)
+
+LATENCY BUDGET (30-second SLO for critical):
+- Event ingestion (Pub/Sub): <100ms
+- Processing + enrichment: <5 sec
+- Anomaly detection (streaming): <10 sec
+- Correlation + severity: <10 sec
+- Alert delivery: <5 sec
+- Total: <30 sec end-to-end for critical path ✓
+- Standard path (5 min SLO): allows batch ML models in the loop
 
 Does this match your expectations?"
 ```
@@ -482,70 +495,111 @@ Phase 4 (12+ months): Self-healing supply chain
 
 ---
 
-## RIGOROUS SCALE ESTIMATES
+## RIGOROUS SCALE ESTIMATES (GOOGLE-SCALE)
 
 ### Event Volume Modeling
 ```
-SOURCE BREAKDOWN (50M events/day target):
-┌──────────────────────────────────────────────────────────────────┐
-│ Source              │ Events/day │ Avg Size │ Pattern              │
-├─────────────────────┼────────────┼──────────┼──────────────────────┤
-│ Warehouse WMS       │ 15M        │ 400B     │ Steady during shifts │
-│ Carrier tracking    │ 12M        │ 600B     │ Batchy (hourly dumps)│
-│ POS/store events    │ 10M        │ 300B     │ Peaks at meal times  │
-│ IoT sensors         │ 8M         │ 200B     │ Continuous, uniform  │
-│ ERP changes (CDC)   │ 3M         │ 800B     │ Business hours heavy │
-│ Supplier updates    │ 2M         │ 500B     │ Random, bursty       │
-├─────────────────────┼────────────┼──────────┼──────────────────────┤
-│ TOTAL               │ 50M        │ ~420B avg│                      │
-└──────────────────────────────────────────────────────────────────┘
+SOURCE BREAKDOWN (5B events/day — current, Google-scale platform):
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ Source              │ Events/day  │ Avg Size │ Pattern                        │
+├─────────────────────┼─────────────┼──────────┼────────────────────────────────┤
+│ IoT sensors         │ 2B          │ 200B     │ Continuous, 100M+ devices      │
+│ Warehouse WMS       │ 1B          │ 400B     │ Burst during shifts, 50K sites │
+│ Carrier tracking    │ 800M        │ 600B     │ Batchy + streaming (GPS)       │
+│ POS/store events    │ 500M        │ 300B     │ Peaks at meal/shopping times   │
+│ ERP CDC streams     │ 400M        │ 800B     │ Business hours heavy           │
+│ Supplier updates    │ 200M        │ 500B     │ Global, 24/7                   │
+│ External (weather,  │ 100M        │ 1KB      │ Periodic pulls + push alerts   │
+│  news, maritime)    │             │          │                                │
+├─────────────────────┼─────────────┼──────────┼────────────────────────────────┤
+│ TOTAL               │ 5B          │ ~600B avg│ 58K events/sec avg             │
+└──────────────────────────────────────────────────────────────────────────────┘
 
 THROUGHPUT MATH:
-- Average: 50M/day ÷ 86,400 = 580 events/sec
-- Peak (Black Friday, shift change, carrier batch dump):
-  - 10x average = 5,800 events/sec
-  - Burst (carrier dumps 6 hours of data): 20x for 5 minutes = 11,600/sec
-- Kafka can handle 1M+ events/sec per broker → COMFORTABLE
+- Average: 5B/day ÷ 86,400 = 58,000 events/sec
+- Peak (Black Friday + Chinese NY overlap, global disruption):
+  - 10x average = 580,000 events/sec
+  - Burst (cascading failures, major port closure): 20x = 1.16M events/sec
+- At 50B/day target (18 months): 580K avg, 5.8M/sec peak
+
+WHY KAFKA ALONE WON'T WORK AT THIS SCALE:
+  - Kafka can handle 1M+/sec per cluster, BUT:
+  - Multi-region replication at 580K/sec = massive cross-region bandwidth
+  - Topic management for 1000 tenants × 50 event types = 50K topics
+  - Operational burden of managing 100+ Kafka brokers across 3 regions
+  
+  SOLUTION: Google Pub/Sub as ingestion layer (serverless, unlimited throughput)
+  - Pub/Sub → Dataflow (streaming) for processing
+  - Kafka only for internal pub-sub between microservices where ordering matters
+  - Pub/Sub handles: global routing, per-tenant topics, automatic scaling
 
 STORAGE:
-- Raw events: 50M × 420B = 21 GB/day
-- 90-day hot storage: 1.9 TB (BigQuery or Bigtable)
-- 7-year cold archive: 55 TB (GCS, compressed: ~15 TB)
-- Processed/enriched events: 2x raw size = 42 GB/day (metadata added)
-- Aggregated metrics: <1 GB/day (time-series rollups)
+- Raw events: 5B × 600B = 3 TB/day
+- 30-day hot (Bigtable): 90 TB (with TTL auto-deletion)
+- 1-year warm (BigQuery): 1.1 PB (queryable, compressed ~300 TB)
+- 7-year cold archive (GCS Coldline): 7.7 PB (compressed ~2 PB)
+- Enriched events (2x raw): 6 TB/day (stored alongside raw)
+- Aggregated metrics: 50 GB/day (time-series rollups per entity per minute)
+- Total storage footprint: ~3 PB active, ~10 PB archive
 ```
 
 ### Anomaly Detection Scaling
 ```
-DETECTION PIPELINE COMPUTE:
+DETECTION PIPELINE COMPUTE (at 58K events/sec):
 
-Layer 1 (Rules): 
-  - 200 rules evaluated per event
-  - CPU cost: ~10μs per event (simple comparisons)
-  - 5,800 events/sec peak × 10μs = 58ms of CPU per second
-  - 1 core handles this easily
+Layer 1 (Rules — stateless): 
+  - 500 rules evaluated per event (tenant-specific + global)
+  - CPU cost: ~5μs per event per rule, but batched: ~20μs total per event
+  - 58K events/sec × 20μs = 1.16 CPU-seconds per second
+  - 2 CPU cores handle this easily per region (TRIVIAL)
   
-Layer 2 (Statistical):
-  - Per-entity Z-score requires state (running mean, stddev)
-  - Entities: 100K SKUs × 500 locations = 50M entities
-  - State per entity: 100 bytes (mean, variance, count, window)
-  - Total state: 50M × 100B = 5 GB
-  - Fits in Flink's RocksDB state backend
-  - Cost: ~50μs per event (hash lookup + math)
+Layer 2 (Statistical — stateful):
+  - Per-entity Z-score, moving averages, seasonal decomposition
+  - Entities: 500M globally (1000 tenants × 500K entities avg)
+  - State per entity: 500 bytes (multi-metric baselines)
+  - Total state: 500M × 500B = 250 GB
+  - TOO LARGE for in-memory (Flink RocksDB state max practical: ~50GB/TM)
+  - SOLUTION: External state in Bigtable (10ms reads) with local LRU cache
+    - Hot entities (1% actively updating): 5M × 500B = 2.5 GB (fits in cache)
+    - Cold entities: lazy load from Bigtable on first event
+  - Cost: ~200μs per event (cache hit) to ~10ms (Bigtable lookup)
+  - Throughput: 58K/sec × 200μs avg = 11.6 CPU-sec/sec = 12 cores
   
-Layer 3 (ML):
-  - Isolation Forest inference: ~1ms per event batch (batch of 100)
-  - 5,800 events/sec ÷ 100 batch = 58 inferences/sec
-  - Single GPU: can do 10K+ inferences/sec → one GPU is enough
-  - Sequence model: more expensive, ~5ms per sequence evaluation
-  - Only trigger on suspicious entities (pre-filtered): ~500/sec
-  - Cost: 1-2 GPUs
+Layer 3 (ML — GPU-accelerated):
+  - Isolation Forest + LSTM sequence models
+  - Only triggered for events that pass L1+L2 (pre-filtered to ~1% = 580/sec)
+  - Batch inference: groups of 64 events every 110ms
+  - Single A100 GPU: ~10K inferences/sec → handles this easily
+  - Sequence model (contextual anomaly): processes entity timelines
+    - 500M entities, but only active subset matters: ~5M/day update
+    - Batch re-score hourly: 5M × 500ms = 2.5M seconds ÷ 3600 = 700 GPUs
+    - OR: trigger only on L2 alerts = 50K/day → single GPU, <1 hour
+  
+Layer 4 (LLM-based — for novel anomalies, Google-scale addition):
+  - For anomalies that don't match known patterns (truly novel)
+  - Feed entity context + recent events to Gemini for reasoning
+  - Volume: ~500 novel cases/day (1 in 10K anomalies)
+  - Cost: $0.05/assessment × 500 = $25/day (trivial at this scale)
+  - Value: catches black swan events no rule or statistical model can
 
-TOTAL COMPUTE FOR DETECTION:
-  - 4-8 Flink TaskManagers (4 CPU, 16 GB each) for L1+L2
-  - 2 GPU instances for L3 (can be preemptible for cost savings)
-  - Cost: ~$5K/month compute
+TOTAL COMPUTE FOR DETECTION (per region):
+  - 50 Dataflow workers (L1+L2), auto-scaling 20-200
+  - 4 GPU instances (L3 ML inference)
+  - 2 LLM API connections (L4 novel detection)
+  - Bigtable state cluster: 50 nodes (250 GB state + read throughput)
+  - Cost: ~$200K/month per region × 3 regions = $600K/month
+
+DETECTION FUNNEL (daily, platform-wide):
+  5B events → 50M pass L1 (1%) → 5M pass L2 (10% of L1)
+  → 500K confirmed anomalies (10% of L2) → 50K actionable alerts (10%)
+  → 5K auto-actions triggered → 500 escalations to humans
+
+  Per customer (1000 tenants):
+  5M events → 50K L1 → 5K L2 → 500 anomalies → 50 alerts → 5 auto-actions
+  THIS IS MANAGEABLE. The filtering cascade is the key design insight.
 ```
+
+---
 
 ---
 
@@ -901,30 +955,51 @@ WHY NOT ML CLUSTERING:
 
 ---
 
-## CAPACITY PLANNING FOR GROWTH
+## CAPACITY PLANNING FOR GROWTH (GOOGLE-SCALE)
 
 ```
-┌──────────────┬──────────┬──────────┬──────────┬───────────────────────┐
-│              │ Year 0   │ Year 1   │ Year 2   │ Scaling Action        │
-├──────────────┼──────────┼──────────┼──────────┼───────────────────────┤
-│ Events/day   │ 5M       │ 50M      │ 200M     │ Add Kafka brokers     │
-│ Peak QPS     │ 300      │ 5,800    │ 23,000   │ More Flink parallelism│
-│ Entities     │ 1M       │ 50M      │ 200M     │ Shard state backend   │
-│ Storage/day  │ 2 GB     │ 21 GB    │ 84 GB    │ Tiered (hot→warm→cold)│
-│ Anomalies/day│ 5K       │ 50K      │ 200K     │ Better grouping/filter│
-│ Alerts/day   │ 50       │ 500      │ 2000     │ ML severity, auto-act │
-│ Kafka brokers│ 3        │ 6        │ 12       │ Linear with throughput│
-│ Flink TMs    │ 2        │ 8        │ 20       │ Linear with QPS       │
-│ Monthly cost │ $3K      │ $15K     │ $45K     │                       │
-└──────────────┴──────────┴──────────┴──────────┴───────────────────────┘
+┌──────────────┬──────────────┬──────────────┬──────────────┬─────────────────────────────┐
+│              │ Year 0       │ Year 1       │ Year 2       │ Scaling Action              │
+├──────────────┼──────────────┼──────────────┼──────────────┼─────────────────────────────┤
+│ Events/day   │ 5B           │ 20B          │ 50B          │ Pub/Sub auto-scales         │
+│ Peak events/s│ 580K         │ 2.3M         │ 5.8M         │ Dataflow auto-scaling       │
+│ Tenants      │ 200          │ 500          │ 1,000        │ Namespace isolation          │
+│ Entities     │ 100M         │ 300M         │ 500M         │ Bigtable-backed state       │
+│ Storage/day  │ 3 TB         │ 12 TB        │ 30 TB        │ Tiered (hot→warm→cold)      │
+│ Anomalies/day│ 1M           │ 3M           │ 5M           │ ML filtering + correlation  │
+│ Alerts/day   │ 10K          │ 30K          │ 50K          │ Intelligent grouping        │
+│ Auto-actions │ 1K           │ 5K           │ 15K          │ Confidence-gated expansion  │
+│ Pub/Sub tput │ Auto         │ Auto         │ Auto         │ Serverless (unlimited)      │
+│ Dataflow wrk │ 100          │ 300          │ 800          │ Auto-scale with backlog     │
+│ Bigtable nds │ 50           │ 150          │ 400          │ Scale with entity count     │
+│ GPU (ML)     │ 8            │ 20           │ 50           │ Scale with anomaly volume   │
+│ Monthly cost │ $600K        │ $1.5M        │ $3.5M        │                             │
+│ Cost/tenant  │ $3K          │ $3K          │ $3.5K        │ Sub-linear per-tenant cost! │
+│ Revenue/tent │ $15K         │ $20K         │ $25K         │ Expand with value delivered  │
+└──────────────┴──────────────┴──────────────┴──────────────┴─────────────────────────────┘
 
-KEY INSIGHT: Cost scales linearly with events, NOT with anomalies.
-The anomaly detection FILTERS data — downstream (alerting, actions) 
-handles a tiny fraction of the event volume.
+KEY INSIGHTS AT GOOGLE SCALE:
 
-At Year 2 (200M events/day):
-- Ingestion + processing: $35K/month (scales with event volume)
-- Anomaly detection: $5K/month (scales with entity count)
-- Alerting + actions: $3K/month (scales with anomaly count — small!)
-- Storage: $2K/month (tiered — most data in cold storage)
+1. Cost scales with EVENTS, not anomalies (same as before, just 1000x bigger)
+   - Ingestion + processing: 80% of cost (scales linearly with event volume)
+   - Detection (stateful): 15% of cost (scales with entity count, sub-linear)
+   - Actions + alerting: 5% of cost (scales with anomaly count — tiny!)
+
+2. Per-tenant cost DECREASES with scale:
+   - Shared infrastructure (Pub/Sub, Dataflow, Bigtable) amortized
+   - ML models shared across tenants (transfer learning on anomaly patterns)
+   - Operational team size grows sub-linearly (automation improves)
+
+3. At Year 2 ($3.5M/month):
+   - Ingestion + Dataflow: $2M/month (58% — dominated by compute)
+   - Bigtable (state + storage): $800K/month (23%)
+   - GPU/ML inference: $400K/month (11%)
+   - Alerting + actions: $150K/month (4%)
+   - Networking/egress: $150K/month (4%)
+
+4. CRITICAL SCALING INFLECTION POINTS:
+   - 1B events/day: Kafka becomes operational burden → migrate to Pub/Sub
+   - 100M entities: In-memory state impossible → Bigtable-backed state
+   - 10K alerts/day/tenant: Human review impossible → ML severity scoring mandatory
+   - 1M auto-actions/day: Need formal verification of action safety
 ```

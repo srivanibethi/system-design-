@@ -37,45 +37,55 @@
 14. "Do different customers have different document formats and rules?"
 15. "How do we handle completely new document types we haven't seen before?"
 
-### Expected Answers:
-- 50K documents/day, growing to 200K
-- 60% digital PDF, 30% scanned, 10% email/EDI
-- ~500 distinct templates across all customers
-- Critical fields: amounts (99%), dates (99%), PO/invoice numbers (99.5%), line items (95%)
-- Currently: 40% manual data entry, 60% semi-automated (template matching)
-- Multi-tenant: each customer has unique document formats
-- Extracted data feeds into ERP and a matching/reconciliation engine
-- Processing time: <5 minutes per document
-- Learn from corrections within 24 hours
+### Expected Answers (Google-Scale):
+- 50 MILLION documents/day across 5,000+ enterprise customers globally
+- 40% digital PDF, 30% scanned paper, 15% email attachments, 10% EDI/XML, 5% photos
+- 500K+ distinct templates/layouts (long tail: new formats discovered daily)
+- Critical fields: amounts (99.5%), dates (99.5%), PO/invoice numbers (99.9%), line items (98%)
+- Currently: replacing a fragmented market of manual + legacy OCR solutions
+- Multi-tenant: each customer has unique formats, rules, validation logic, and ERP schemas
+- Feeds into: ERP, payment systems, compliance engines, audit trails, analytics platforms
+- Processing time: <60 seconds for 95% of documents (real-time for business workflows)
+- Learn from corrections within 1 hour (continuous online learning at scale)
+- Multi-language: 40+ languages, including CJK, Arabic (RTL), mixed-language documents
 
 ---
 
 ## PHASE 2: Requirements & Math (3 minutes)
 
 ```
-"Let me size this:
+"Let me size this at Google scale:
 
 THROUGHPUT:
-- 200K docs/day (target) = ~2.3 docs/sec sustained
-- But bursty: most arrive 8am-6pm business hours = ~5.5 docs/sec
-- Peak burst: 10x = 55 docs/sec (month-end invoice dumps)
+- 50M docs/day = ~580 docs/sec sustained
+- But bursty: business hours across global timezones = ~800 docs/sec base
+- Peak burst: 5x = 4,000 docs/sec (quarter-end, audit seasons, tax deadlines)
+- Absolute max design target: 10,000 docs/sec (headroom + growth)
 
 PROCESSING BUDGET:
-- 5 minutes per doc target
-- Actual processing time per doc: 10-60 seconds (depending on complexity)
-- Bottleneck is ML inference, not I/O
+- <60 seconds SLO for 95% of documents (p95)
+- <5 seconds for known templates with high-confidence extraction (60% of docs)
+- <30 seconds for novel layouts requiring VLM analysis (30% of docs)
+- <120 seconds for complex multi-page documents with tables (10% of docs)
+- Bottleneck: GPU inference for VLM/OCR, NOT I/O or network
 
 ACCURACY MATH:
-- 99% accuracy on amounts means: 1 error per 100 documents
-- At 200K docs/day = 2,000 errors/day needing human review
-- Human review capacity: 20 reviewers × 100 docs/day = 2,000/day ✓
-- Goal: drive auto-approval rate up (currently 60% → target 95%)
+- 99.5% accuracy on amounts = 1 error per 200 documents
+- At 50M docs/day = 250K documents flagged for review
+- BUT: auto-approval rate target is 92% → only 4M docs need human review
+- 4M reviews/day at avg 30 sec per review = 33,000 reviewer-hours/day
+- Crowd-sourced + in-house reviewers across timezones = feasible with 5,000 reviewers
+- Each reviewer: 100-150 docs/hour = 800-1200 docs/day
+- KEY INSIGHT: Every 1% improvement in auto-approval = 500K fewer reviews = 40 fewer FTEs
 
 STORAGE:
-- Avg document: 200KB (PDF) + 5KB (extracted JSON) + 1KB (metadata)
-- Daily: 200K × 200KB = 40 GB/day for originals
-- Keep originals 7 years (compliance) = ~100 TB
-- Extracted data: negligible vs originals
+- Avg document: 250KB (PDF/image) + 8KB (extracted JSON) + 2KB (metadata/audit)
+- Daily originals: 50M × 250KB = 12.5 TB/day
+- Daily extracted: 50M × 10KB = 500 GB/day
+- Keep originals 10 years (compliance): 12.5 TB × 365 × 10 = 45 PB
+- Extracted data (queryable): 500 GB × 365 × 10 = 1.8 PB
+- Training data (corrections + ground truth): ~500 TB accumulated
+- TOTAL STORAGE: ~50 PB (lifecycle-managed with cold/archive tiers)
 
 COST:
 - OCR/extraction per doc: $0.01-0.05 (depending on model)
@@ -485,54 +495,85 @@ but in the automated reconciliation it enables."
 
 ---
 
-## DETAILED SCALE ESTIMATES
+## DETAILED SCALE ESTIMATES (GOOGLE-SCALE)
 
 ### Processing Pipeline Throughput
 ```
-DOCUMENTS: 200K/day target
+DOCUMENTS: 50M/day target (across 5,000 enterprise customers)
 
-PROCESSING TIME BUDGET (5 min per doc max):
-  But actual processing is much faster:
-  - Preprocessing (OCR, layout): 2-5 seconds
-  - Classification: 200ms (known template) to 5s (VLM for unknown)
-  - Extraction: 1-15 seconds (depends on model tier)
-  - Validation: 200ms (rule checks)
-  - Total: 3-25 seconds per doc (NOT 5 minutes — that's the SLA)
+PROCESSING TIME BUDGET (<60 sec SLO for p95):
+  Tier 1 — Known template, high confidence (60% = 30M docs/day):
+  - Template match: 100ms
+  - Field extraction (regex + lightweight model): 500ms
+  - Validation: 200ms
+  - Total: <1 second per doc
+  
+  Tier 2 — Known layout family, needs ML extraction (30% = 15M docs/day):
+  - OCR (if scanned): 2 seconds
+  - LayoutLM/DocFormer inference: 3 seconds
+  - Field extraction + validation: 1 second
+  - Total: 3-6 seconds per doc
+  
+  Tier 3 — Novel/complex documents requiring VLM (10% = 5M docs/day):
+  - OCR + layout analysis: 3 seconds
+  - VLM inference (Gemini Pro Vision): 5-15 seconds
+  - Multi-page correlation: 5 seconds
+  - Total: 15-25 seconds per doc
 
 THROUGHPUT DESIGN:
-  200K docs/day ÷ 16 active hours = 12,500 docs/hour = 3.5 docs/sec
-  Peak (month-end): 10x = 35 docs/sec
+  50M docs/day ÷ 20 active hours (global) = 2.5M docs/hour = 694 docs/sec avg
+  Peak (quarter-end/tax season): 5x = 3,472 docs/sec
   
-  With avg processing time of 10 seconds:
-  - Need 35 × 10 = 350 concurrent processing slots at peak
-  - If workers have 4 vCPU: 350 ÷ 4 = 88 worker instances (peak)
-  - Auto-scale: 20 instances baseline, up to 100 at peak
+  Tier 1 processing (30M/day, <1s each):
+  - 30M ÷ 72,000s (20 hours) = 417 docs/sec avg
+  - Need: 417 concurrent processing slots (CPU-only, cheap)
+  - 50 GKE pods with 8 vCPU each handles this at 80% utilization
   
-  GPU for VLM/OCR:
-  - 20% of docs go to VLM path (40K/day = 2,500/hour = 0.7/sec)
-  - VLM inference: 5-15 seconds per doc
-  - Need: 0.7 × 10 = 7 concurrent VLM requests
-  - 2 GPU instances with batching handle this easily
+  Tier 2 processing (15M/day, ~5s each):
+  - 15M ÷ 72,000s = 208 docs/sec avg
+  - Concurrent: 208 × 5s = 1,040 processing slots needed
+  - Mix of CPU (OCR) + GPU (LayoutLM): 100 GPU pods (4× A100 each)
+  - Batch inference: groups of 32 docs per GPU = efficient utilization
+  
+  Tier 3 processing (5M/day, ~15s each):
+  - 5M ÷ 72,000s = 69 docs/sec avg
+  - Concurrent: 69 × 15s = 1,035 VLM inference slots
+  - With batching and 4× throughput per GPU: 260 GPU pods
+  - OR: Use Vertex AI Gemini API (serverless, pay-per-call)
+    5M × $0.03/doc = $150K/day via API vs $200K/month self-hosted
+    DECISION: Self-host for cost + latency control at this scale
 
 COST:
-┌──────────────────────────────────────────────────────────────────┐
-│ Component           │ Cost/doc  │ Daily (200K) │ Monthly         │
-├─────────────────────┼───────────┼──────────────┼─────────────────┤
-│ OCR (Google Doc AI) │ $0.01     │ $2,000       │ $60K            │
-│ Template model      │ $0.001    │ $160 (80%)   │ $5K             │
-│ LayoutLM inference  │ $0.005    │ $100 (10%)   │ $3K             │
-│ VLM (Claude/GPT-4V) │ $0.05     │ $2,000 (20%) │ $60K            │
-│ Compute (workers)   │ $0.002    │ $400         │ $12K            │
-│ Storage (S3+DB)     │ $0.0005   │ $100         │ $3K             │
-├─────────────────────┼───────────┼──────────────┼─────────────────┤
-│ TOTAL               │ ~$0.024   │ ~$4,800      │ ~$143K          │
-└──────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────────┐
+│ Component              │ Cost/doc  │ Daily (50M)  │ Monthly Cost            │
+├────────────────────────┼───────────┼──────────────┼─────────────────────────┤
+│ Tier 1 (template)      │ $0.0005   │ $15K         │ $450K                   │
+│ Tier 2 (LayoutLM)      │ $0.005    │ $75K         │ $2.25M                  │
+│ Tier 3 (VLM/Gemini)    │ $0.02     │ $100K        │ $3.0M                   │
+│ OCR (Google Doc AI)    │ $0.003    │ $67K (45%)   │ $2.0M                   │
+│ Storage (GCS + BQ)     │ $0.0002   │ $10K         │ $300K                   │
+│ Human review (4M/day)  │ $0.30     │ $1.2M        │ $36M (biggest cost!)    │
+│ Compute (GKE + GPU)    │ $0.003    │ $150K        │ $4.5M                   │
+├────────────────────────┼───────────┼──────────────┼─────────────────────────┤
+│ TOTAL                  │ ~$0.033   │ ~$1.6M/day   │ ~$48M/month             │
+│ vs manual entry only   │ $3-5/doc  │ $150-250M/day│ Would be $4.5-7.5B/mo!  │
+│ SAVINGS                │ ~99%      │              │                         │
+└────────────────────────────────────────────────────────────────────────────┘
 
-BREAK-EVEN vs MANUAL:
-  Manual data entry: $3-5 per document (offshore), $8-12 (US)
-  Our system: $0.024 per doc (automated) + $0.50 per reviewed doc
-  Auto-approval rate 95%: avg cost = 0.95×$0.024 + 0.05×$0.55 = $0.05/doc
-  Savings: 60-99x cheaper than manual entry
+CRITICAL INSIGHT: Human review is 75% of total cost!
+- Every 1% improvement in auto-approval = $360K/month savings
+- This is WHY active learning and continuous model improvement is the #1 priority
+- At 99% auto-approval (target Year 3): human cost drops to $3.6M/month
+  Total system cost: ~$15M/month → $180M/year
+  Revenue (5000 customers × avg $100K/year): $500M/year → 64% gross margin
+
+BREAK-EVEN vs ALTERNATIVES:
+  Our cost: $0.033/doc (at 92% auto-approval)
+  Manual data entry (offshore): $3-5/doc
+  Legacy OCR + manual review: $0.50-1.00/doc
+  Savings vs legacy: 15-30x cheaper
+  Savings vs manual: 100-150x cheaper
+  Customer ROI: Processes 50M docs that would cost $150M+ manually for $48M total
 ```
 
 ### Accuracy Deep Dive
