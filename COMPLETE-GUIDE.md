@@ -3710,11 +3710,6 @@ regression, promote to 100% after 24h of green metrics."
 | Operations | Monitoring, deployment strategy, failure modes | ☐ |
 | Staff signals | Drove conversation, proposed phased rollout, org implications | ☐ |
 | Communication | Structured, clear, invited discussion | ☐ |
-
-
----
-
-
 # ENHANCED: AI Supply Chain Copilot — Trade-offs, Alternatives & Scale
 
 ## Addendum to Mock Interview 1 — Read alongside the main file
@@ -4682,11 +4677,6 @@ ALERTING:
 | Monitoring | Business metrics alongside ML metrics | ☐ |
 | Cold start | Foundation model, category average, rapid adaptation | ☐ |
 | Staff signals | Phased delivery, team implications, business impact | ☐ |
-
-
----
-
-
 # ENHANCED: Demand Forecasting System — Trade-offs, Alternatives & Scale
 
 ## Addendum to Mock Interview 2 — Read alongside the main file
@@ -5637,11 +5627,6 @@ Phase 4 (12+ months): Self-healing supply chain
 | Actionability | Clear escalation, feedback loop, learning from outcomes | ☐ |
 | Scale reasoning | 50M events → 50K anomalies → 500 alerts → 50 critical | ☐ |
 | Evolution | Phased from manual to autonomous, trust-building | ☐ |
-
-
----
-
-
 # ENHANCED: Real-Time Event Processing — Trade-offs, Alternatives & Scale
 
 ## Addendum to Mock Interview 3 — Read alongside the main file
@@ -6554,11 +6539,6 @@ Evolution path:
 | Real-time vs batch | Dual-speed: batch for planning, real-time for urgency | ☐ |
 | User experience | Present options with trade-offs, not just "best" answer | ☐ |
 | Staff signals | Phased evolution, stability vs optimality trade-off | ☐ |
-
-
----
-
-
 # ENHANCED: Global Logistics Optimization — Trade-offs, Alternatives & Scale
 
 ## Addendum to Mock Interview 4 — Read alongside the main file
@@ -7535,11 +7515,6 @@ but in the automated reconciliation it enables."
 | Active learning | Correction capture, clustering, automated retraining | ☐ |
 | Business value | 3-way matching, auto-approval rate, cost savings | ☐ |
 | Staff signals | Phased rollout, metrics-driven, operational concerns | ☐ |
-
-
----
-
-
 # ENHANCED: Document Processing — Trade-offs, Alternatives & Scale
 
 ## Addendum to Mock Interview 5 — Read alongside the main file
@@ -8489,11 +8464,6 @@ If this doesn't work, the whole system concept fails."
 | Honest about limitations | Explicitly stated what system CAN'T do | ☐ |
 | Moonshot + pragmatic | Big vision but phased practical delivery | ☐ |
 | Staff signals | "What I'd build first", de-risking assumptions | ☐ |
-
-
----
-
-
 # ENHANCED: Disruption Prediction — Trade-offs, Alternatives & Scale
 
 ## Addendum to Mock Interview 6 — Read alongside the main file
